@@ -19,7 +19,7 @@ loom {
 	splitEnvironmentSourceSets()
 
 	mods {
-		"templatemod" {
+		"litematica_printer" {
 			sourceSet sourceSets.main
 			sourceSet sourceSets.client
 		}

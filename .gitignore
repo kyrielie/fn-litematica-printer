@@ -26,7 +26,8 @@ runData/
 .DS_Store
 Thumbs.db
 
-# Machine-specific dev indexes (ignored so local filesystem paths are not committed)
+# Machine-specific dev indexes & runtime diagnostics
 LOCAL_DEV_REFERENCES.md
 crash-reports/
 logs/
+.kotlin/

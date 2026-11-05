@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "id": "templatemod",
+  "id": "litematica_printer",
   "version": "${version}",
-  "name": "Template Mod",
-  "description": "Production Fabric 26.3 mod scaffold with Kotlin, Loom 1.17, and split environment source sets.",
+  "name": "Litematica Printer",
+  "description": "Next-generation standalone Litematica printer with anti-cheat safety, moving player dynamics, and autonomous scaffolding.",
   "authors": [
     "kyrielie"
   ],
   "contact": {
-    "homepage": "https://fabricmc.net",
+    "homepage": "https://github.com",
     "sources": "https://github.com"
   },
   "license": "MIT",
-  "icon": "assets/templatemod/icon.png",
+  "icon": "assets/litematica_printer/icon.png",
   "environment": "*",
   "entrypoints": {
     "main": [
-      "kyrielie.templatemod.TemplateMod"
+      "kyrielie.printer.PrinterMod"
     ],
     "client": [
-      "kyrielie.templatemod.client.TemplateModClient"
+      "kyrielie.printer.client.PrinterClient"
     ],
     "modmenu": [
-      "kyrielie.templatemod.client.config.ModMenuIntegration"
+      "kyrielie.printer.client.config.PrinterModMenuIntegration"
     ]
   },
   "depends": {
@@ -33,6 +33,8 @@
     "fabric-api": "*"
   },
   "suggests": {
+    "litematica": "*",
+    "malilib": "*",
     "modmenu": "*"
   }
 }
