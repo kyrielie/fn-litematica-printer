@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "templatemod",
+  "version": "${version}",
+  "name": "Template Mod",
+  "description": "Production Fabric 26.3 mod scaffold with Kotlin, Loom 1.17, and split environment source sets.",
+  "authors": [
+    "kyrielie"
+  ],
+  "contact": {
+    "homepage": "https://fabricmc.net",
+    "sources": "https://github.com"
+  },
+  "license": "MIT",
+  "icon": "assets/templatemod/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "kyrielie.templatemod.TemplateMod"
+    ],
+    "client": [
+      "kyrielie.templatemod.client.TemplateModClient"
+    ],
+    "modmenu": [
+      "kyrielie.templatemod.client.config.ModMenuIntegration"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-language-kotlin": ">=1.14.2",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "modmenu": "*"
+  }
+}
