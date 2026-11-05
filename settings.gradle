@@ -9,4 +9,4 @@ pluginManagement {
 	}
 }
 
-rootProject.name = 'fabric-mod-template'
+rootProject.name = 'fn-litematica-printer'
