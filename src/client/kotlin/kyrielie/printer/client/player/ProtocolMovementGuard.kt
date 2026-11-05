@@ -1,11 +1,11 @@
 package kyrielie.printer.client.player
 
-import net.minecraft.core.BlockPos
-import net.minecraft.network.Connection
+import kyrielie.printer.util.wrapDegrees
 import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.game.ServerboundClientTickEndPacket
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket
 import org.slf4j.LoggerFactory
+import kotlin.math.abs
 
 /**
  * Protocol safety guard for Minecraft 26.2/26.3 movement packets.
@@ -15,22 +15,25 @@ import org.slf4j.LoggerFactory
  * (ServerboundMovePlayerPacket.Pos or PosRot) in the same client tick
  * causes server-side heuristic kicks or "disconnect.flying".
  *
- * When the player naturally moves/walks while the printer is active,
- * any additional camera aiming updates emitted by the printer are
- * safely downgraded to look-only packets (ServerboundMovePlayerPacket.Rot).
+ * When camera aiming updates are emitted by the printer:
+ * 1. Downgraded to look-only packets (ServerboundMovePlayerPacket.Rot).
+ * 2. Capped by angular epsilon threshold to prevent packet flooding on consecutive placements.
+ * 3. Player entity rotation (setYRot/setXRot) is kept in sync with the sent packet to prevent
+ *    whiplash snaps on subsequent client ticks.
  */
 object ProtocolMovementGuard {
 
     private val logger = LoggerFactory.getLogger("Printer/ProtocolMovementGuard")
+    private const val ROTATION_EPSILON_DEGREES = 0.5f
 
     @Volatile
     private var positionSentThisTick: Boolean = false
 
     @Volatile
-    private var lastSentYaw: Float = 0f
+    private var lastSentYaw: Float = Float.NaN
 
     @Volatile
-    private var lastSentPitch: Float = 0f
+    private var lastSentPitch: Float = Float.NaN
 
     fun onClientTickEnd() {
         positionSentThisTick = false
@@ -44,8 +47,8 @@ object ProtocolMovementGuard {
                 positionSentThisTick = true
             }
             if (packet.hasRotation()) {
-                val yaw = packet.getYRot(lastSentYaw)
-                val pitch = packet.getXRot(lastSentPitch)
+                val yaw = packet.getYRot(if (lastSentYaw.isFinite()) lastSentYaw else 0f)
+                val pitch = packet.getXRot(if (lastSentPitch.isFinite()) lastSentPitch else 0f)
                 if (yaw.isFinite()) lastSentYaw = yaw
                 if (pitch.isFinite()) lastSentPitch = pitch
             }
@@ -54,27 +57,10 @@ object ProtocolMovementGuard {
 
     fun isPositionSentThisTick(): Boolean = positionSentThisTick
 
-    fun createSafeRotationPacket(
-        yaw: Float,
-        pitch: Float,
-        onGround: Boolean,
-        horizontalCollision: Boolean
-    ): ServerboundMovePlayerPacket.Rot {
-        val safeYaw = if (yaw.isFinite()) yaw else lastSentYaw
-        val safePitch = if (pitch.isFinite()) pitch else lastSentPitch
-        lastSentYaw = safeYaw
-        lastSentPitch = safePitch
-        return ServerboundMovePlayerPacket.Rot(safeYaw, safePitch, onGround, horizontalCollision)
-    }
-
-    fun sendLookUpdate(
-        connection: Connection,
-        yaw: Float,
-        pitch: Float,
-        onGround: Boolean = true,
-        horizontalCollision: Boolean = false
-    ) {
-        val packet = createSafeRotationPacket(yaw, pitch, onGround, horizontalCollision)
-        connection.send(packet)
+    fun shouldSendRotation(yaw: Float, pitch: Float): Boolean {
+        if (lastSentYaw.isNaN() || lastSentPitch.isNaN()) return true
+        val yawDiff = abs(wrapDegrees(yaw - lastSentYaw))
+        val pitchDiff = abs(pitch - lastSentPitch)
+        return yawDiff > ROTATION_EPSILON_DEGREES || pitchDiff > ROTATION_EPSILON_DEGREES
     }
 }

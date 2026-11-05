@@ -1,7 +1,9 @@
 package kyrielie.printer.client.guides
 
 import kyrielie.printer.client.player.FaceRaycaster
+import kyrielie.printer.client.player.FaceRaycastResult
 import kyrielie.printer.client.player.InventoryRestockManager
+import kyrielie.printer.client.player.PrinterController
 import kyrielie.printer.client.player.VisiblePlacementFace
 import kyrielie.printer.planner.CarpetProtocol
 import net.minecraft.client.Minecraft
@@ -22,14 +24,16 @@ sealed class PlacementAction {
     data class PlaceBlock(
         val hitResult: BlockHitResult,
         val hand: InteractionHand,
-        val targetPos: BlockPos
+        val targetPos: BlockPos,
+        val aimVec: Vec3
     ) : PlacementAction()
 
     data class MultiClick(
         val hitResult: BlockHitResult,
         val hand: InteractionHand,
         val targetPos: BlockPos,
-        val clickCount: Int
+        val clickCount: Int,
+        val aimVec: Vec3
     ) : PlacementAction()
 
     data class ScaffoldSequence(
@@ -55,40 +59,48 @@ object PlacementGuideEngine {
         schematicState: BlockState,
         useCarpetProtocol: Boolean = true,
         enableScaffolding: Boolean = true,
-        maxReach: Double = 4.5
+        maxReach: Double = 4.5,
+        debug: Boolean = false
     ): PlacementAction? {
         val currentState = world.getBlockState(pos)
 
-        // 1. Check if the block is already placed but needs state progression (repeaters, comparators, noteblocks)
+        // 1. Check if the block is already placed but needs state progression
         if (currentState.block == schematicState.block) {
             val clicksNeeded = calculateClicksNeeded(currentState, schematicState)
             if (clicksNeeded > 0) {
+                val centerVec = Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)
                 val hitResult = BlockHitResult(
-                    Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5),
+                    centerVec,
                     Direction.UP,
                     pos,
                     false
                 )
-                return PlacementAction.MultiClick(hitResult, InteractionHand.MAIN_HAND, pos, clicksNeeded)
+                return PlacementAction.MultiClick(hitResult, InteractionHand.MAIN_HAND, pos, clicksNeeded, centerVec)
             }
-            return null // Already matches exactly
+            return null
         }
 
         // 2. Must be replaceable or air in the real world
         if (!currentState.isAir && !currentState.canBeReplaced()) {
+            if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: world block ${currentState.block} is not air/replaceable")
             return null
         }
 
         // 3. Resolve required item to place this block
         val item = schematicState.block.asItem()
-        val hand = InventoryRestockManager.prepareItem(mc, player, item) ?: return null
+        val hand = InventoryRestockManager.prepareItem(mc, player, item)
+        if (hand == null) {
+            if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: item $item not found in inventory!")
+            return null
+        }
 
         // 4. Try standard solid-neighbor face placement
-        val placementFace = FaceRaycaster.findPlacementFace(world, player, eyePos, pos, maxReach)
-        if (placementFace != null) {
+        val raycastResult = FaceRaycaster.findPlacementFaceWithDiagnostics(world, player, eyePos, pos, maxReach)
+        if (raycastResult is FaceRaycastResult.Success) {
+            val placementFace = raycastResult.face
             var hitVec = placementFace.hitVec
+            val realHitVec = placementFace.hitVec
 
-            // Apply Carpet Protocol hit-vector encoding if active and block has facing
             if (useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.FACING)) {
                 val facing = schematicState.getValue(BlockStateProperties.FACING)
                 val facingId = CarpetProtocol.getFacingId(facing.name)
@@ -109,14 +121,18 @@ object PlacementGuideEngine {
                 placementFace.placeAgainstPos,
                 false
             )
-            return PlacementAction.PlaceBlock(hitResult, hand, pos)
+            return PlacementAction.PlaceBlock(hitResult, hand, pos, realHitVec)
+        } else if (raycastResult is FaceRaycastResult.Failure) {
+            if (debug) {
+                val reasons = raycastResult.reasons.take(3).joinToString("; ")
+                PrinterController.logger.info("[Printer Debug] $pos rejected: $reasons")
+            }
         }
 
         // 5. If no solid contact face exists, check for autonomous scaffolding
         if (enableScaffolding) {
             val site = ScaffoldHelper.findScaffoldSite(world, player, eyePos, pos, maxReach)
             if (site != null) {
-                // Prepare scaffold item (dirt)
                 val scaffoldItem = net.minecraft.world.item.Items.DIRT
                 val scaffoldHand = InventoryRestockManager.prepareItem(mc, player, scaffoldItem)
                 if (scaffoldHand != null) {
@@ -129,21 +145,18 @@ object PlacementGuideEngine {
     }
 
     private fun calculateClicksNeeded(current: BlockState, target: BlockState): Int {
-        // Redstone Repeaters: Delay property 1..4
         if (current.hasProperty(RepeaterBlock.DELAY) && target.hasProperty(RepeaterBlock.DELAY)) {
             val curDelay = current.getValue(RepeaterBlock.DELAY)
             val tarDelay = target.getValue(RepeaterBlock.DELAY)
             return (tarDelay - curDelay + 4) % 4
         }
 
-        // Comparators: Mode property (COMPARE vs SUBTRACT)
         if (current.hasProperty(ComparatorBlock.MODE) && target.hasProperty(ComparatorBlock.MODE)) {
             val curMode = current.getValue(ComparatorBlock.MODE)
             val tarMode = target.getValue(ComparatorBlock.MODE)
             return if (curMode != tarMode) 1 else 0
         }
 
-        // Note Blocks: Note property 0..24
         if (current.hasProperty(NoteBlock.NOTE) && target.hasProperty(NoteBlock.NOTE)) {
             val curNote = current.getValue(NoteBlock.NOTE)
             val tarNote = target.getValue(NoteBlock.NOTE)
