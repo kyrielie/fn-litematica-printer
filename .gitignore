@@ -1,0 +1,32 @@
+# Gradle build & cache outputs
+.gradle/
+build/
+out/
+bin/
+
+# Loom runtime & run directories
+run/
+runClient/
+runServer/
+runData/
+*.lck
+*.log
+
+# IntelliJ IDEA / Eclipse / VSCode
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Machine-specific dev indexes (ignored so local filesystem paths are not committed)
+LOCAL_DEV_REFERENCES.md
+crash-reports/
+logs/
