@@ -163,4 +163,27 @@ class PrinterCoreTest {
 
         assertEquals(crosshairTarget, sorted[0], "Exact crosshair target must be prioritized above all others")
     }
+
+    @Test
+    fun testBuildOrderPlannerDirectCrosshairNeighbor() {
+        val inFront = PlacementTarget(0, 60, 3, "minecraft:glass")
+        val crosshairTarget = PlacementTarget(-3, 60, 0, "minecraft:glass")
+        val targets = listOf(inFront, crosshairTarget)
+
+        // Player looking at adjacent block face (-2, 60, 0)
+        val sorted = BuildOrderPlanner.sortCandidates(
+            targets,
+            playerX = 0.5,
+            playerY = 60.0,
+            playerZ = 0.5,
+            playerYaw = 0f,
+            playerPitch = 0f,
+            eyeY = 61.62,
+            crosshairX = -2,
+            crosshairY = 60,
+            crosshairZ = 0
+        )
+
+        assertEquals(crosshairTarget, sorted[0], "Neighbor face crosshair target must be prioritized")
+    }
 }

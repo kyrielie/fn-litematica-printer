@@ -72,9 +72,16 @@ object BuildOrderPlanner {
         crosshairZ: Int? = null
     ): List<PlacementTarget> {
         val comparator = Comparator<PlacementTarget> { a, b ->
-            // 0. Direct Crosshair Target Priority (if crosshair is aimed directly at a candidate)
-            val aIsCrosshair = crosshairX != null && a.x == crosshairX && a.y == crosshairY && a.z == crosshairZ
-            val bIsCrosshair = crosshairX != null && b.x == crosshairX && b.y == crosshairY && b.z == crosshairZ
+            // 0. Direct Crosshair Target Priority (if crosshair is aimed directly at candidate or adjacent place-against face)
+            val hasCrosshair = crosshairX != null && crosshairY != null && crosshairZ != null
+            val aIsCrosshair = hasCrosshair && (
+                (a.x == crosshairX && a.y == crosshairY && a.z == crosshairZ) ||
+                (abs(a.x - crosshairX) + abs(a.y - crosshairY) + abs(a.z - crosshairZ) <= 1)
+            )
+            val bIsCrosshair = hasCrosshair && (
+                (b.x == crosshairX && b.y == crosshairY && b.z == crosshairZ) ||
+                (abs(b.x - crosshairX) + abs(b.y - crosshairY) + abs(b.z - crosshairZ) <= 1)
+            )
             if (aIsCrosshair != bIsCrosshair) {
                 return@Comparator if (aIsCrosshair) -1 else 1
             }
