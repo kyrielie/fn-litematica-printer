@@ -6,7 +6,11 @@ plugins {
 	id "org.jetbrains.kotlin.jvm" version "2.4.0"
 }
 
-version = project.mod_version.contains("+") ? project.mod_version : "${project.mod_version}+${project.minecraft_version}"
+def baseVersion = (project.findProperty("mod_version") ?: System.getenv("MOD_VERSION") ?: "1.0.0").toString().trim()
+if (baseVersion.startsWith("v")) {
+	baseVersion = baseVersion.substring(1)
+}
+version = baseVersion.contains("+") ? baseVersion : "${baseVersion}+${project.minecraft_version}"
 group = project.maven_group
 
 repositories {
