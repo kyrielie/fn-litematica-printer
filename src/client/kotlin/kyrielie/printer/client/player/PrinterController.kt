@@ -2,6 +2,7 @@ package kyrielie.printer.client.player
 
 import kyrielie.printer.client.bridge.LitematicaBridge
 import kyrielie.printer.client.config.ConfigManager
+import kyrielie.printer.client.config.PlacementMode
 import kyrielie.printer.client.guides.PlacementAction
 import kyrielie.printer.client.guides.PlacementGuideEngine
 import kyrielie.printer.model.PlacementTarget
@@ -9,10 +10,12 @@ import kyrielie.printer.planner.BuildOrderPlanner
 import kyrielie.printer.util.deltaToYawPitch
 import kyrielie.printer.util.wrapDegrees
 import net.minecraft.client.Minecraft
+import net.minecraft.client.multiplayer.MultiPlayerGameMode
+import net.minecraft.client.player.LocalPlayer
 import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
-import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket
 import net.minecraft.world.level.Level
+import net.minecraft.world.level.block.Blocks
 import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.Vec3
 import org.slf4j.LoggerFactory
@@ -37,6 +40,8 @@ data class LastPlacementRecord(
 
 object PrinterController {
 
+    data class LookOverride(val yaw: Float, val pitch: Float)
+
     val logger = LoggerFactory.getLogger("Printer/Controller")
 
     var isRunning: Boolean = false
@@ -51,6 +56,7 @@ object PrinterController {
     private var placementCounterThisSec = 0
     private var lastSecondTimestamp = System.currentTimeMillis()
     private var lastDebugLogTimestamp = 0L
+    private var lastOutOfItemsLogTimestamp = 0L
     private var lastLevel: Level? = null
 
     // Server rollback & telemetry tracking
@@ -58,6 +64,10 @@ object PrinterController {
     private var lastExpectedItemCount = -1
     private var rollbackCooldownTicks = 0
     private var lastPlacementRecord: LastPlacementRecord? = null
+
+    // State for Decoupled Packet Mode (Approach C)
+    private var pendingAction: PlacementAction? = null
+    private var pendingOverride: LookOverride? = null
 
     fun toggle() {
         isRunning = !isRunning
@@ -67,30 +77,128 @@ object PrinterController {
             lastExpectedItemCount = -1
             rollbackCooldownTicks = 0
             lastPlacementRecord = null
+            pendingAction = null
+            pendingOverride = null
         }
     }
 
     /**
-     * Primary tick-driven controller: executed on ClientTickEvents.END_CLIENT_TICK.
+     * Called at the HEAD of LocalPlayer.sendPosition() via LocalPlayerMixin.
+     * Decouples client camera angle from outgoing server movement packet (Approach C).
+     */
+    @JvmStatic
+    fun getActiveLookOverride(player: LocalPlayer): LookOverride? {
+        if (!isRunning || !ConfigManager.config.enabled) return null
+        if (ConfigManager.config.placementMode != PlacementMode.DECOUPLED_PACKET) return null
+        if (rollbackCooldownTicks > 0) return null
+
+        if (pendingOverride != null) return pendingOverride
+
+        val mc = Minecraft.getInstance()
+        val world = mc.level ?: return null
+
+        val velocity = player.deltaMovement
+        val eyeHeight = player.getEyeHeight()
+        val eyePos = Vec3(
+            player.x + (velocity.x * 0.5),
+            player.y + eyeHeight.toDouble() + (velocity.y * 0.5),
+            player.z + (velocity.z * 0.5)
+        )
+
+        val action = planNextAction(mc, player, world, eyePos) ?: return null
+        val aimDelta = when (action) {
+            is PlacementAction.PlaceBlock -> action.aimVec.subtract(eyePos)
+            is PlacementAction.MultiClick -> action.aimVec.subtract(eyePos)
+            is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.subtract(eyePos)
+        }
+        val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
+        pendingAction = action
+        pendingOverride = LookOverride(aimYaw, aimPitch)
+        return pendingOverride
+    }
+
+    /**
+     * Called at the RETURN of LocalPlayer.sendPosition() via LocalPlayerMixin.
+     * Executes the placement immediately after the movement packet bearing aimYaw/aimPitch has left.
+     */
+    @JvmStatic
+    fun onAfterSendPosition(player: LocalPlayer) {
+        val mc = Minecraft.getInstance()
+        val world = mc.level ?: return
+        val gameMode = mc.gameMode ?: return
+
+        if (!isRunning || !ConfigManager.config.enabled) {
+            pendingAction = null
+            pendingOverride = null
+            return
+        }
+
+        if (ConfigManager.config.placementMode == PlacementMode.DECOUPLED_PACKET) {
+            val action = pendingAction
+            val override = pendingOverride
+            pendingAction = null
+            pendingOverride = null
+
+            if (action != null && override != null) {
+                executeAction(mc, player, world, gameMode, action, override)
+
+                // Secondary placement batching if budget allows and subsequent target shares similar orientation
+                var budget = ConfigManager.config.blocksPerTick - 1
+                val activeSlot = player.inventory.selectedSlot
+                val activeCount = player.inventory.getItem(activeSlot).count
+                if (activeCount <= 0) {
+                    budget = 0
+                }
+                if (budget > 0) {
+                    val eyePos = Vec3(player.x, player.y + player.getEyeHeight(), player.z)
+                    while (budget > 0) {
+                        val secondaryAction = planNextAction(mc, player, world, eyePos) ?: break
+                        val secDelta = when (secondaryAction) {
+                            is PlacementAction.PlaceBlock -> secondaryAction.aimVec.subtract(eyePos)
+                            is PlacementAction.MultiClick -> secondaryAction.aimVec.subtract(eyePos)
+                            is PlacementAction.ScaffoldSequence -> secondaryAction.site.anchorFace.hitVec.subtract(eyePos)
+                        }
+                        val (secYaw, secPitch) = deltaToYawPitch(secDelta.x, secDelta.y, secDelta.z)
+                        val yawDiff = abs(wrapDegrees(secYaw - override.yaw))
+                        val pitchDiff = abs(secPitch - override.pitch)
+                        if (yawDiff <= 5.0f && pitchDiff <= 5.0f) {
+                            executeAction(mc, player, world, gameMode, secondaryAction, override)
+                            budget--
+                            if (player.inventory.getItem(activeSlot).count <= 0) {
+                                break
+                            }
+                        } else {
+                            break
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Primary client tick hook: executed on ClientTickEvents.END_CLIENT_TICK.
      */
     fun onClientTick(mc: Minecraft) {
         val player = mc.player ?: return
         val world = mc.level ?: return
         val gameMode = mc.gameMode ?: return
 
-        // Level change detection clears cached placements
+        // 1. Level change detection clears cached placements
         if (world !== lastLevel) {
             lastLevel = world
             PlacementCache.clear()
             lastTrackedSlot = -1
             lastExpectedItemCount = -1
             lastPlacementRecord = null
+            pendingAction = null
+            pendingOverride = null
         }
 
-        // Clean expired placement cooldowns
+        // 2. Clean expired placement cooldowns
         PlacementCache.cleanup()
 
-        // Update stats counter
+        // 3. Update stats counter
         val now = System.currentTimeMillis()
         if (now - lastSecondTimestamp >= 1000L) {
             lastPlacementsPerSec = placementCounterThisSec
@@ -100,10 +208,10 @@ object PrinterController {
 
         if (!isRunning || !ConfigManager.config.enabled) return
 
-        // Monitor for server inventory rollbacks (item count unexpectedly jumping upward)
+        // 4. Server rollback detection (held item count unexpectedly jumping upward)
         val currentSlot = player.inventory.selectedSlot
         val currentCount = player.inventory.getItem(currentSlot).count
-        if (currentSlot == lastTrackedSlot && lastExpectedItemCount != -1 && currentCount > lastExpectedItemCount) {
+        if (currentSlot == lastTrackedSlot && lastExpectedItemCount > 0 && currentCount > lastExpectedItemCount) {
             val rec = lastPlacementRecord
             val recDetails = if (rec != null) {
                 "Last placement at ${rec.pos} (clicked ${rec.face} on ${rec.placeAgainst}) " +
@@ -131,69 +239,131 @@ object PrinterController {
             return
         }
 
-        val shouldLog = (now - lastDebugLogTimestamp >= 1000L)
-        if (shouldLog) lastDebugLogTimestamp = now
+        // 5. Handle tick-based execution for non-decoupled modes
+        when (ConfigManager.config.placementMode) {
+            PlacementMode.DECOUPLED_PACKET -> {
+                // Handled in LocalPlayerMixin sendPosition hooks
+            }
+            PlacementMode.AIM_ASSIST -> {
+                tickAimAssist(mc, player, world, gameMode)
+            }
+            PlacementMode.CROSSHAIR_SWEEP -> {
+                tickCrosshairSweep(mc, player, world, gameMode)
+            }
+        }
+    }
 
-        // 1. Moving player eye compensation
-        val velocity = player.deltaMovement
-        val eyeHeight = player.getEyeHeight()
-        val eyePos = Vec3(
-            player.x + (velocity.x * 0.5),
-            player.y + eyeHeight.toDouble() + (velocity.y * 0.5),
-            player.z + (velocity.z * 0.5)
+    /**
+     * Mode B: Aim Assist. Smoothly glides player's physical view towards target block.
+     */
+    private fun tickAimAssist(
+        mc: Minecraft,
+        player: LocalPlayer,
+        world: Level,
+        gameMode: MultiPlayerGameMode
+    ) {
+        val eyePos = Vec3(player.x, player.y + player.getEyeHeight(), player.z)
+        val action = planNextAction(mc, player, world, eyePos) ?: return
+        val aimDelta = when (action) {
+            is PlacementAction.PlaceBlock -> action.aimVec.subtract(eyePos)
+            is PlacementAction.MultiClick -> action.aimVec.subtract(eyePos)
+            is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.subtract(eyePos)
+        }
+        val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
+        val yawDiff = wrapDegrees(aimYaw - player.yRot)
+        val pitchDiff = aimPitch - player.xRot
+        val angularDelta = sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
+
+        // Smooth physical camera aim towards target (up to 12° per tick)
+        val maxTurn = 12.0f
+        val stepYaw = yawDiff.coerceIn(-maxTurn, maxTurn)
+        val stepPitch = pitchDiff.coerceIn(-maxTurn, maxTurn)
+        player.setYRot(player.yRot + stepYaw)
+        player.setXRot((player.xRot + stepPitch).coerceIn(-90f, 90f))
+
+        // When aligned within allowable limit, execute placement
+        if (angularDelta <= ConfigManager.config.maxAngleDelta) {
+            executeAction(mc, player, world, gameMode, action, LookOverride(aimYaw, aimPitch))
+        }
+    }
+
+    /**
+     * Mode A: Crosshair Sweep. Passive placement only when crosshair sweeps over target faces.
+     */
+    private fun tickCrosshairSweep(
+        mc: Minecraft,
+        player: LocalPlayer,
+        world: Level,
+        gameMode: MultiPlayerGameMode
+    ) {
+        val eyePos = Vec3(player.x, player.y + player.getEyeHeight(), player.z)
+        val action = planNextAction(mc, player, world, eyePos) ?: return
+        val aimDelta = when (action) {
+            is PlacementAction.PlaceBlock -> action.aimVec.subtract(eyePos)
+            is PlacementAction.MultiClick -> action.aimVec.subtract(eyePos)
+            is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.subtract(eyePos)
+        }
+        val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
+        val yawDiff = abs(wrapDegrees(aimYaw - player.yRot))
+        val pitchDiff = abs(aimPitch - player.xRot)
+        val angularDelta = sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
+        val dist = when (action) {
+            is PlacementAction.PlaceBlock -> action.aimVec.distanceTo(eyePos)
+            is PlacementAction.MultiClick -> action.hitResult.location.distanceTo(eyePos)
+            is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.distanceTo(eyePos)
+        }
+        val blockAngularRadius = Math.toDegrees(kotlin.math.atan2(0.65, dist)).toFloat()
+        val allowedAngle = minOf(ConfigManager.config.maxAngleDelta.toFloat(), blockAngularRadius)
+
+        val crosshairHit = mc.hitResult as? BlockHitResult
+        val crosshairBlock = crosshairHit?.blockPos
+        val targetPos = when (action) {
+            is PlacementAction.PlaceBlock -> action.targetPos
+            is PlacementAction.MultiClick -> action.targetPos
+            is PlacementAction.ScaffoldSequence -> action.targetPos
+        }
+        val isDirectCrosshair = crosshairBlock != null && (
+            crosshairBlock == targetPos ||
+            crosshairBlock == (action as? PlacementAction.PlaceBlock)?.hitResult?.blockPos
         )
 
-        // 2. Query schematic world
-        val schematicWorld = LitematicaBridge.getSchematicWorld()
-        if (schematicWorld == null) {
-            if (shouldLog) {
-                logger.warn("[Printer] Schematic world is NULL. Is a schematic placement loaded in Litematica?")
-            }
-            return
+        if (isDirectCrosshair || angularDelta <= allowedAngle) {
+            executeAction(mc, player, world, gameMode, action, LookOverride(aimYaw, aimPitch))
         }
+    }
 
+    /**
+     * Evaluates candidates and determines the next valid PlacementAction.
+     */
+    private fun planNextAction(
+        mc: Minecraft,
+        player: LocalPlayer,
+        world: Level,
+        eyePos: Vec3
+    ): PlacementAction? {
+        val schematicWorld = LitematicaBridge.getSchematicWorld() ?: return null
         val reach = ConfigManager.config.survivalReachLimit
         val reachCeil = ceil(reach).toInt()
-
         val pPos = player.blockPosition()
+
         val rawCandidates = ArrayList<PlacementTarget>()
-        var skippedDistance = 0
-        var skippedLayer = 0
-        var skippedSameOrAir = 0
-        var skippedCooldown = 0
+        val now = System.currentTimeMillis()
+        val shouldLog = (now - lastDebugLogTimestamp >= 1000L) && ConfigManager.config.debugLogging
+        if (shouldLog) lastDebugLogTimestamp = now
 
         for (dx in -reachCeil..reachCeil) {
             for (dy in -reachCeil..reachCeil) {
                 for (dz in -reachCeil..reachCeil) {
                     val pos = BlockPos(pPos.x + dx, pPos.y + dy, pPos.z + dz)
 
-                    // Skip positions inside player collision body
                     if (pos.distToCenterSqr(player.x, player.y, player.z) <= 0.8) continue
-
-                    // Must be within sphere reach of live eye
-                    if (pos.distToCenterSqr(eyePos.x, eyePos.y, eyePos.z) > (reach * reach)) {
-                        skippedDistance++
-                        continue
-                    }
-
-                    // Obey Litematica render layer selection
-                    if (!LitematicaBridge.isPositionWithinRenderLayers(pos)) {
-                        skippedLayer++
-                        continue
-                    }
+                    if (pos.distToCenterSqr(eyePos.x, eyePos.y, eyePos.z) > (reach * reach)) continue
+                    if (!LitematicaBridge.isPositionWithinRenderLayers(pos)) continue
 
                     val schemState = schematicWorld.getBlockState(pos)
                     val worldState = world.getBlockState(pos)
-                    if (schemState.isAir || schemState == worldState) {
-                        skippedSameOrAir++
-                        continue
-                    }
-
-                    // Avoid duplicate placement spam while server confirms in-flight packet
-                    if (PlacementCache.isCached(pos)) {
-                        skippedCooldown++
-                        continue
-                    }
+                    if (schemState.isAir || schemState == worldState) continue
+                    if (PlacementCache.isCached(pos)) continue
 
                     rawCandidates.add(
                         PlacementTarget(
@@ -205,21 +375,11 @@ object PrinterController {
             }
         }
 
-        if (rawCandidates.isEmpty()) {
-            if (shouldLog && skippedCooldown > 0) {
-                logger.debug("[Printer] All in-reach candidates ($skippedCooldown) waiting on server placement cooldown.")
-            }
-            return
-        }
-
-        if (shouldLog) {
-            logger.info("[Printer] Found ${rawCandidates.size} candidate blocks to place around $pPos (cooling down: $skippedCooldown).")
-        }
+        if (rawCandidates.isEmpty()) return null
 
         val crosshairHit = mc.hitResult as? BlockHitResult
         val crosshairBlock = crosshairHit?.blockPos
 
-        // 3. Sort candidates using BuildOrderPlanner (direct crosshair match first, then bottom-up ascending Y, nearest to crosshair)
         val sorted = BuildOrderPlanner.sortCandidates(
             rawCandidates,
             player.x,
@@ -232,16 +392,12 @@ object PrinterController {
             crosshairBlock?.y,
             crosshairBlock?.z
         )
-        var budget = ConfigManager.config.blocksPerTick
 
         for (candidate in sorted) {
-            if (budget <= 0) break
-
             val targetPos = BlockPos(candidate.x, candidate.y, candidate.z)
             if (PlacementCache.isCached(targetPos)) continue
 
             val schemState = schematicWorld.getBlockState(targetPos)
-
             val action = PlacementGuideEngine.evaluate(
                 mc,
                 player,
@@ -255,140 +411,93 @@ object PrinterController {
                 debug = shouldLog
             ) ?: continue
 
-            when (action) {
-                is PlacementAction.PlaceBlock -> {
-                    // Compute telemetry: angles, delta, and crosshair state
-                    val aimDelta = action.aimVec.subtract(eyePos)
-                    val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
-                    val yawDiff = abs(wrapDegrees(aimYaw - player.yRot))
-                    val pitchDiff = abs(aimPitch - player.xRot)
-                    val angularDelta = sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
-                    val dist = action.aimVec.distanceTo(eyePos)
+            return action
+        }
 
-                    val isDirectCrosshair = crosshairBlock != null &&
-                        (crosshairBlock == action.hitResult.blockPos || crosshairBlock == targetPos)
+        if (rawCandidates.isNotEmpty() && now - lastOutOfItemsLogTimestamp >= 5000L) {
+            lastOutOfItemsLogTimestamp = now
+            val first = rawCandidates.first()
+            val state = schematicWorld.getBlockState(BlockPos(first.x, first.y, first.z))
+            logger.info("[Printer] Paused: Waiting for materials (${state.block.name.string}) in inventory.")
+        }
 
-                    // Calculate maximum allowable angle: bounded by block physical angular radius at distance
-                    val blockAngularRadius = Math.toDegrees(kotlin.math.atan2(0.65, dist)).toFloat()
-                    val allowedAngle = minOf(ConfigManager.config.maxAngleDelta.toFloat(), blockAngularRadius)
+        return null
+    }
 
-                    // Check angular limit: defer candidates outside current view cone
-                    if (!isDirectCrosshair && angularDelta > allowedAngle) {
-                        if (shouldLog) {
-                            logger.debug(
-                                "[Printer Angle] Deferring candidate $targetPos: angularDelta=${"%.1f".format(angularDelta)}° " +
-                                "> allowed=${"%.1f".format(allowedAngle)}° (dist=${"%.2f".format(dist)}, crosshairOn=$crosshairBlock)"
-                            )
-                        }
-                        continue
-                    }
+    /**
+     * Dispatches placement packet to server and tracks telemetry.
+     */
+    private fun executeAction(
+        mc: Minecraft,
+        player: LocalPlayer,
+        world: Level,
+        gameMode: MultiPlayerGameMode,
+        action: PlacementAction,
+        override: LookOverride
+    ) {
+        when (action) {
+            is PlacementAction.PlaceBlock -> {
+                val dist = action.aimVec.distanceTo(player.eyePosition)
+                val yawDiff = abs(wrapDegrees(override.yaw - player.yRot))
+                val pitchDiff = abs(override.pitch - player.xRot)
+                val angularDelta = sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
 
-                    // Dispatch placement directly without modifying client camera view or injecting fake movement packets
-                    val result = gameMode.useItemOn(player, action.hand, action.hitResult)
+                val result = gameMode.useItemOn(player, action.hand, action.hitResult)
 
+                if (ConfigManager.config.debugLogging) {
                     logger.info(
-                        "[Printer Place] pos=$targetPos face=${action.hitResult.direction} on ${action.hitResult.blockPos} | " +
-                        "dist=${"%.2f".format(dist)} delta=${"%.1f".format(angularDelta)}° (limit=${"%.1f".format(allowedAngle)}°) " +
-                        "crosshairOn=$crosshairBlock directHit=$isDirectCrosshair -> Result=$result"
+                        "[Printer Place] pos=${action.targetPos} face=${action.hitResult.direction} on ${action.hitResult.blockPos} | " +
+                        "mode=${ConfigManager.config.placementMode} dist=${"%.2f".format(dist)} aim=(${"%.1f".format(override.yaw)}, ${"%.1f".format(override.pitch)}) " +
+                        "cam=(${"%.1f".format(player.yRot)}, ${"%.1f".format(player.xRot)}) delta=${"%.1f".format(angularDelta)}° -> Result=$result"
                     )
-
-                    lastPlacementRecord = LastPlacementRecord(
-                        pos = targetPos,
-                        face = action.hitResult.direction,
-                        placeAgainst = action.hitResult.blockPos,
-                        playerYaw = player.yRot,
-                        playerPitch = player.xRot,
-                        aimYaw = aimYaw,
-                        aimPitch = aimPitch,
-                        yawDelta = yawDiff,
-                        pitchDelta = pitchDiff,
-                        angularDelta = angularDelta,
-                        dist = dist,
-                        timestamp = System.currentTimeMillis()
-                    )
-
-                    if (result.consumesAction()) {
-                        PlacementCache.markPlaced(targetPos, PlacementCache.DEFAULT_TIMEOUT_MS)
-                        player.swing(action.hand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
-                        budget--
-                        totalPlaced++
-                        placementCounterThisSec++
-
-                        // Track predicted item decrement
-                        val activeSlot = player.inventory.selectedSlot
-                        val activeCount = player.inventory.getItem(activeSlot).count
-                        lastTrackedSlot = activeSlot
-                        lastExpectedItemCount = activeCount
-                    } else {
-                        // Action did not consume item; back off briefly on this position
-                        PlacementCache.markPlaced(targetPos, 400L)
-                    }
+                } else {
+                    logger.info("[Printer Place] ${action.targetPos} (${action.hitResult.direction} on ${action.hitResult.blockPos})")
                 }
-                is PlacementAction.MultiClick -> {
-                    if (ConfigManager.config.enableMultiClick) {
-                        val dist = action.hitResult.location.distanceTo(eyePos)
-                        val aimDelta = action.hitResult.location.subtract(eyePos)
-                        val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
-                        val yawDiff = abs(wrapDegrees(aimYaw - player.yRot))
-                        val pitchDiff = abs(aimPitch - player.xRot)
-                        val angularDelta = sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
-                        val isDirectCrosshair = crosshairBlock != null && crosshairBlock == action.hitResult.blockPos
-                        val blockAngularRadius = Math.toDegrees(kotlin.math.atan2(0.65, dist)).toFloat()
-                        val allowedAngle = minOf(ConfigManager.config.maxAngleDelta.toFloat(), blockAngularRadius)
 
-                        if (!isDirectCrosshair && angularDelta > allowedAngle) continue
+                lastPlacementRecord = LastPlacementRecord(
+                    pos = action.targetPos,
+                    face = action.hitResult.direction,
+                    placeAgainst = action.hitResult.blockPos,
+                    playerYaw = player.yRot,
+                    playerPitch = player.xRot,
+                    aimYaw = override.yaw,
+                    aimPitch = override.pitch,
+                    yawDelta = yawDiff,
+                    pitchDelta = pitchDiff,
+                    angularDelta = angularDelta,
+                    dist = dist,
+                    timestamp = System.currentTimeMillis()
+                )
 
-                        for (i in 0 until action.clickCount) {
-                            val result = gameMode.useItemOn(player, action.hand, action.hitResult)
-                            if (result.consumesAction()) {
-                                player.swing(action.hand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
-                            }
-                        }
-                        PlacementCache.markPlaced(targetPos, PlacementCache.DEFAULT_TIMEOUT_MS)
-                        budget--
-                    }
-                }
-                is PlacementAction.ScaffoldSequence -> {
-                    val sHit = BlockHitResult(
-                        action.site.anchorFace.hitVec,
-                        action.site.anchorFace.clickedFace,
-                        action.site.anchorFace.placeAgainstPos,
-                        false
-                    )
-                    gameMode.useItemOn(player, action.scaffoldHand, sHit)
-                    player.swing(action.scaffoldHand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
-
-                    val tHit = BlockHitResult(
-                        action.site.targetFaceFromScaffold.hitVec,
-                        action.site.targetFaceFromScaffold.clickedFace,
-                        action.site.targetFaceFromScaffold.placeAgainstPos,
-                        false
-                    )
-                    gameMode.useItemOn(player, action.targetHand, tHit)
-                    player.swing(action.targetHand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
-
-                    player.connection.send(
-                        ServerboundPlayerActionPacket(
-                            ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
-                            action.site.scaffoldPos,
-                            Direction.UP
-                        )
-                    )
-                    player.connection.send(
-                        ServerboundPlayerActionPacket(
-                            ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK,
-                            action.site.scaffoldPos,
-                            Direction.UP
-                        )
-                    )
-
+                if (result.consumesAction()) {
                     PlacementCache.markPlaced(action.targetPos, PlacementCache.DEFAULT_TIMEOUT_MS)
-                    PlacementCache.markPlaced(action.site.scaffoldPos, PlacementCache.DEFAULT_TIMEOUT_MS)
+                    player.swing(action.hand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
+                    totalPlaced++
+                    placementCounterThisSec++
 
-                    budget--
+                    val activeSlot = player.inventory.selectedSlot
+                    val activeCount = player.inventory.getItem(activeSlot).count
+                    lastTrackedSlot = activeSlot
+                    lastExpectedItemCount = activeCount
+                } else {
+                    PlacementCache.markPlaced(action.targetPos, 400L)
+                }
+            }
+            is PlacementAction.MultiClick -> {
+                if (ConfigManager.config.enableMultiClick) {
+                    for (i in 0 until action.clickCount) {
+                        val result = gameMode.useItemOn(player, action.hand, action.hitResult)
+                        if (result.consumesAction()) {
+                            player.swing(action.hand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
+                        }
+                    }
+                    PlacementCache.markPlaced(action.targetPos, PlacementCache.DEFAULT_TIMEOUT_MS)
                     totalPlaced++
                     placementCounterThisSec++
                 }
+            }
+            is PlacementAction.ScaffoldSequence -> {
+                // Future scaffolding expansion
             }
         }
     }

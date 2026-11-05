@@ -49,7 +49,7 @@ class PrinterClient : ClientModInitializer {
                 // Print comprehensive status directly to the console
                 logger.info("==================================================")
                 logger.info("[Printer] TOGGLE -> $status | Litematica Bridge: $bridgeStatus")
-                logger.info("[Printer] Config: reach=${ConfigManager.config.survivalReachLimit}, budget=${ConfigManager.config.blocksPerTick}, maxAngle=${ConfigManager.config.maxAngleDelta}°, carpet=${ConfigManager.config.carpetProtocol}, scaffold=${ConfigManager.config.enableScaffolding}")
+                logger.info("[Printer] Config: mode=${ConfigManager.config.placementMode}, reach=${ConfigManager.config.survivalReachLimit}, budget=${ConfigManager.config.blocksPerTick}, maxAngle=${ConfigManager.config.maxAngleDelta}°, carpet=${ConfigManager.config.carpetProtocol}, scaffold=${ConfigManager.config.enableScaffolding}")
                 logger.info("==================================================")
 
                 // Brief in-game action bar confirmation

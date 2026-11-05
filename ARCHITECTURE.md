@@ -25,9 +25,14 @@ Running `./gradlew test` executes within a standalone test JVM without game boot
 - When placing blocks while the player is moving, the player eye vector is forward-projected using `deltaMovement`.
 - Survival reach is hard-clamped to $\le 4.5$ blocks.
 
-### Protocol Movement Guard
+### Protocol Movement Guard & Silent Packet Aiming (Approach C)
 - In Minecraft 26.2+, sending more than ONE position packet per tick causes server kicks.
 - `ProtocolMovementGuard` ensures camera aiming updates dispatched by the printer are safely downgraded to look-only (`ServerboundMovePlayerPacket.Rot`).
+- **Silent Packet Aiming (Approach C)**: Through `LocalPlayerMixin`, the client's outgoing movement packet look angles are decoupled from the camera orientation. The player retains full free-look control while exact placement vector look packets are transmitted silently right before block interaction, eliminating camera jitter and movement interference.
+
+### Server Telemetry & Verification Loop
+- Incoming server confirmations (`ClientboundBlockChangedAckPacket`), server block state syncs (`ClientboundBlockUpdatePacket`), and position corrections (`ClientboundPlayerPositionPacket`) are tracked by `ServerTelemetryTracker`.
+- Mixins hook `ClientPacketListener` at `@At("TAIL")` to execute safely on the Minecraft Render thread after `PacketUtils.ensureRunningOnSameThread()`, preventing cross-thread rendering exceptions (e.g., Sodium RenderAsserts).
 
 ---
 
@@ -41,6 +46,8 @@ Running `./gradlew test` executes within a standalone test JVM without game boot
 | `src/client/kotlin/kyrielie/printer/client/guides/` | `PlacementGuideEngine`, `ScaffoldHelper` (3-phase autonomous scaffolding). |
 | `src/client/kotlin/kyrielie/printer/client/bridge/` | `LitematicaBridge` (dynamic reflection hook into Litematica). |
 | `src/client/kotlin/kyrielie/printer/client/config/` | `PrinterConfig`, `ConfigManager`, `PrinterYaclConfig`, ModMenu integration. |
-| `src/client/kotlin/kyrielie/printer/client/gui/` | `PrinterHud` in-game stats overlay. |
+| `src/client/kotlin/kyrielie/printer/client/telemetry/` | `ServerTelemetryTracker` tracking live ACKs, rollbacks, and rubberbands. |
+| `src/client/java/kyrielie/printer/client/mixin/` | Mixins into `ClientPacketListener`, `ClientCommonPacketListenerImpl`, and `LocalPlayer`. |
+| `src/client/resources/litematica_printer.client.mixins.json` | Client mixin configuration. |
 | `src/test/kotlin/kyrielie/printer/` | Pure unit tests on JUnit 5 Jupiter. |
 | `src/main/resources/fabric.mod.json` | Fabric metadata, entrypoint registrations, dependencies. |

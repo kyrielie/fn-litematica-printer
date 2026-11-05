@@ -82,7 +82,7 @@ object PlacementGuideEngine {
 
         // 2. Must be replaceable or air in the real world
         if (!currentState.isAir && !currentState.canBeReplaced()) {
-            if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: world block ${currentState.block} is not air/replaceable")
+            if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: world block ${currentState.block} is not air/replaceable")
             return null
         }
 
@@ -90,7 +90,7 @@ object PlacementGuideEngine {
         val item = schematicState.block.asItem()
         val hand = InventoryRestockManager.prepareItem(mc, player, item)
         if (hand == null) {
-            if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: item $item not found in inventory!")
+            if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: item $item not found in inventory!")
             return null
         }
 
@@ -125,7 +125,7 @@ object PlacementGuideEngine {
         } else if (raycastResult is FaceRaycastResult.Failure) {
             if (debug) {
                 val reasons = raycastResult.reasons.take(3).joinToString("; ")
-                PrinterController.logger.info("[Printer Debug] $pos rejected: $reasons")
+                PrinterController.logger.debug("[Printer Debug] $pos rejected: $reasons")
             }
         }
 
