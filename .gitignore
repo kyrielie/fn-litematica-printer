@@ -31,3 +31,7 @@ LOCAL_DEV_REFERENCES.md
 crash-reports/
 logs/
 .kotlin/
+/.rtk
+/.agents
+CLAUDE.md
+CLAUDE.md

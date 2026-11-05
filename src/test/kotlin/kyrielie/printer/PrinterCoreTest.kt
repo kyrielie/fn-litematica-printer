@@ -115,4 +115,52 @@ class PrinterCoreTest {
         // From 0, closest is A (10), then C (20), then B (90)
         assertEquals(listOf("A", "C", "B"), sorted)
     }
+
+    @Test
+    fun testBuildOrderPlannerAngularProximity() {
+        val inFront = PlacementTarget(0, 60, 3, "minecraft:glass") // South (yaw 0)
+        val toSide = PlacementTarget(-3, 60, 0, "minecraft:glass") // West (yaw 90)
+        val behind = PlacementTarget(0, 60, -3, "minecraft:glass") // North (yaw -180)
+
+        val targets = listOf(behind, toSide, inFront)
+
+        // Player looking South (yaw = 0f, pitch = 0f)
+        val sorted = BuildOrderPlanner.sortCandidates(
+            targets,
+            playerX = 0.5,
+            playerY = 60.0,
+            playerZ = 0.5,
+            playerYaw = 0f,
+            playerPitch = 0f,
+            eyeY = 61.62
+        )
+
+        assertEquals(inFront, sorted[0], "Candidate in front of crosshair must be prioritized first")
+        assertEquals(toSide, sorted[1], "Candidate to the side must be second")
+        assertEquals(behind, sorted[2], "Candidate behind player must be last")
+    }
+
+    @Test
+    fun testBuildOrderPlannerDirectCrosshairTarget() {
+        val inFront = PlacementTarget(0, 60, 3, "minecraft:glass")
+        val crosshairTarget = PlacementTarget(-3, 60, 0, "minecraft:glass")
+        val targets = listOf(inFront, crosshairTarget)
+
+        // Even if inFront has lower angular delta from player looking south,
+        // crosshairTarget matches the exact crosshair ray block and must be #1
+        val sorted = BuildOrderPlanner.sortCandidates(
+            targets,
+            playerX = 0.5,
+            playerY = 60.0,
+            playerZ = 0.5,
+            playerYaw = 0f,
+            playerPitch = 0f,
+            eyeY = 61.62,
+            crosshairX = -3,
+            crosshairY = 60,
+            crosshairZ = 0
+        )
+
+        assertEquals(crosshairTarget, sorted[0], "Exact crosshair target must be prioritized above all others")
+    }
 }

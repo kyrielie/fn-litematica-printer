@@ -13,11 +13,13 @@ data class PrinterConfig(
     var carpetProtocol: Boolean = true,
     var enableScaffolding: Boolean = true,
     var enableMultiClick: Boolean = true,
-    var showHud: Boolean = true
+    var showHud: Boolean = true,
+    var maxAngleDelta: Double = 10.0
 ) {
     fun sanitize() {
         survivalReachLimit = survivalReachLimit.coerceIn(1.0, 4.5)
         blocksPerTick = blocksPerTick.coerceIn(1, 8)
+        maxAngleDelta = maxAngleDelta.coerceIn(3.0, 15.0)
     }
 }
 

@@ -6,13 +6,11 @@ import net.minecraft.world.level.block.state.BlockState
 import org.slf4j.LoggerFactory
 
 /**
- * Clean bridge to fi.dy.masa.litematica without hard compile-time crashes.
- * Dynamically queries Litematica's SchematicWorldHandler via reflection
- * if Litematica is loaded in the client environment.
+ * Clean bridge to Litematica supporting both Masa and Sakura-Ryoko / modern Fabric package hierarchies.
  */
 object LitematicaBridge {
 
-    private val logger = LoggerFactory.getLogger("Printer/LitematicaBridge")
+    val logger = LoggerFactory.getLogger("Printer/LitematicaBridge")
 
     @Volatile
     private var litematicaAvailable: Boolean? = null
@@ -24,43 +22,90 @@ object LitematicaBridge {
     private var getRenderLayerRangeMethod: java.lang.reflect.Method? = null
     private var isPositionWithinRangeMethod: java.lang.reflect.Method? = null
 
+    // Fallback packages candidate list
+    private val SCHEMATIC_HANDLER_CANDIDATES = listOf(
+        "fi.dy.masa.litematica.world.SchematicWorldHandler",
+        "fi.dy.masa.litematica.schematic.util.SchematicWorldHandler",
+        "litematica.world.SchematicWorldHandler"
+    )
+
+    private val DATA_MANAGER_CANDIDATES = listOf(
+        "fi.dy.masa.litematica.data.DataManager",
+        "litematica.data.DataManager"
+    )
+
+    private val LAYER_RANGE_CANDIDATES = listOf(
+        "fi.dy.masa.litematica.util.LayerRange",
+        "litematica.util.LayerRange"
+    )
+
     fun isAvailable(): Boolean {
         if (litematicaAvailable == null) {
-            try {
-                schematicWorldHandlerClass = Class.forName("fi.dy.masa.litematica.world.SchematicWorldHandler")
-                getSchematicWorldMethod = schematicWorldHandlerClass?.getMethod("getSchematicWorld")
+            // 1. Try resolving SchematicWorldHandler
+            for (className in SCHEMATIC_HANDLER_CANDIDATES) {
+                try {
+                    val cls = Class.forName(className)
+                    val method = cls.methods.firstOrNull { it.name == "getSchematicWorld" && it.parameterCount == 0 }
+                    if (method != null) {
+                        schematicWorldHandlerClass = cls
+                        getSchematicWorldMethod = method
+                        logger.info("[Printer] Found SchematicWorldHandler at $className")
+                        break
+                    }
+                } catch (_: ClassNotFoundException) {}
+            }
 
-                dataManagerClass = Class.forName("fi.dy.masa.litematica.data.DataManager")
-                getRenderLayerRangeMethod = dataManagerClass?.getMethod("getRenderLayerRange")
+            // 2. Try resolving DataManager
+            for (className in DATA_MANAGER_CANDIDATES) {
+                try {
+                    val cls = Class.forName(className)
+                    val method = cls.methods.firstOrNull { it.name == "getRenderLayerRange" && it.parameterCount == 0 }
+                    if (method != null) {
+                        dataManagerClass = cls
+                        getRenderLayerRangeMethod = method
+                        logger.info("[Printer] Found DataManager at $className")
+                        break
+                    }
+                } catch (_: ClassNotFoundException) {}
+            }
 
-                val layerRangeClass = Class.forName("fi.dy.masa.litematica.util.LayerRange")
-                isPositionWithinRangeMethod = layerRangeClass.getMethod("isPositionWithinRange", BlockPos::class.java)
+            // 3. Try resolving LayerRange
+            for (className in LAYER_RANGE_CANDIDATES) {
+                try {
+                    val cls = Class.forName(className)
+                    val method = cls.methods.firstOrNull { it.name == "isPositionWithinRange" && it.parameterCount == 1 }
+                    if (method != null) {
+                        isPositionWithinRangeMethod = method
+                        logger.info("[Printer] Found LayerRange at $className")
+                        break
+                    }
+                } catch (_: ClassNotFoundException) {}
+            }
 
-                litematicaAvailable = true
-                logger.info("LitematicaBridge: Successfully hooked into active Litematica instance.")
-            } catch (t: Throwable) {
-                litematicaAvailable = false
-                logger.info("LitematicaBridge: Litematica classes not detected in runtime classpath.")
+            litematicaAvailable = (getSchematicWorldMethod != null)
+            if (litematicaAvailable == true) {
+                logger.info("[Printer] Successfully linked to active Litematica instance!")
+            } else {
+                logger.warn("[Printer] Could not locate Litematica classes in current classpath!")
             }
         }
         return litematicaAvailable == true
     }
 
-    /**
-     * Returns the active schematic world instance (which implements Level) or null.
-     */
     fun getSchematicWorld(): Level? {
         if (!isAvailable()) return null
         return try {
-            getSchematicWorldMethod?.invoke(null) as? Level
+            val world = getSchematicWorldMethod?.invoke(null) as? Level
+            if (world == null) {
+                logger.warn("[Printer] SchematicWorldHandler.getSchematicWorld() returned null (is a placement created?)")
+            }
+            world
         } catch (e: Exception) {
+            logger.error("[Printer] Exception invoking getSchematicWorld: ${e.message}", e)
             null
         }
     }
 
-    /**
-     * Queries whether [pos] is within Litematica's currently active render layer range.
-     */
     fun isPositionWithinRenderLayers(pos: BlockPos): Boolean {
         if (!isAvailable()) return true
         return try {
@@ -71,9 +116,6 @@ object LitematicaBridge {
         }
     }
 
-    /**
-     * Gets the expected BlockState from the active schematic world at [pos].
-     */
     fun getSchematicBlockState(pos: BlockPos): BlockState? {
         val world = getSchematicWorld() ?: return null
         return world.getBlockState(pos)

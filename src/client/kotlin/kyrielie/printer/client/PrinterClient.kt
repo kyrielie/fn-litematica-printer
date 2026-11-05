@@ -1,8 +1,8 @@
 package kyrielie.printer.client
 
 import com.mojang.blaze3d.platform.InputConstants
+import kyrielie.printer.client.bridge.LitematicaBridge
 import kyrielie.printer.client.config.ConfigManager
-import kyrielie.printer.client.gui.PrinterHud
 import kyrielie.printer.client.player.PrinterController
 import kyrielie.printer.client.player.ProtocolMovementGuard
 import net.fabricmc.api.ClientModInitializer
@@ -16,14 +16,14 @@ import org.slf4j.LoggerFactory
 class PrinterClient : ClientModInitializer {
 
     companion object {
-        private val logger = LoggerFactory.getLogger("Printer/Client")
+        val logger = LoggerFactory.getLogger("Printer/Client")
 
         lateinit var toggleKey: KeyMapping
             private set
     }
 
     override fun onInitializeClient() {
-        logger.info("Initializing Litematica Printer Client...")
+        logger.info("[Printer] Initializing FN Litematica Printer Client...")
         ConfigManager.load()
 
         // Register keybind (V by default)
@@ -36,18 +36,26 @@ class PrinterClient : ClientModInitializer {
             )
         )
 
-        // Register HUD element
-        PrinterHud.register()
-
         // Register Client Tick
         ClientTickEvents.END_CLIENT_TICK.register { mc ->
             while (toggleKey.consumeClick()) {
-                ConfigManager.config.enabled = !ConfigManager.config.enabled
-                ConfigManager.save()
                 PrinterController.toggle()
-                val status = if (PrinterController.isRunning) "§aENABLED" else "§cDISABLED"
-                mc.player?.sendSystemMessage(
-                    Component.literal("§6[Printer] $status")
+                ConfigManager.config.enabled = PrinterController.isRunning
+                ConfigManager.save()
+
+                val status = if (PrinterController.isRunning) "ENABLED" else "DISABLED"
+                val bridgeStatus = if (LitematicaBridge.isAvailable()) "Linked" else "Standalone"
+
+                // Print comprehensive status directly to the console
+                logger.info("==================================================")
+                logger.info("[Printer] TOGGLE -> $status | Litematica Bridge: $bridgeStatus")
+                logger.info("[Printer] Config: reach=${ConfigManager.config.survivalReachLimit}, budget=${ConfigManager.config.blocksPerTick}, maxAngle=${ConfigManager.config.maxAngleDelta}°, carpet=${ConfigManager.config.carpetProtocol}, scaffold=${ConfigManager.config.enableScaffolding}")
+                logger.info("==================================================")
+
+                // Brief in-game action bar confirmation
+                val chatColor = if (PrinterController.isRunning) "§a" else "§c"
+                mc.player?.sendOverlayMessage(
+                    Component.literal("§6[Printer] $chatColor$status §7(Litematica: $bridgeStatus)")
                 )
             }
 
@@ -55,6 +63,6 @@ class PrinterClient : ClientModInitializer {
             ProtocolMovementGuard.onClientTickEnd()
         }
 
-        logger.info("Litematica Printer Client initialized.")
+        logger.info("[Printer] Client initialized successfully.")
     }
 }

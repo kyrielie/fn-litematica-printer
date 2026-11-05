@@ -69,6 +69,14 @@ object PrinterYaclConfig {
                             .build()
                     )
                     .option(
+                        Option.createBuilder<Double>()
+                            .name(Component.literal("Max Look Angle Limit"))
+                            .description(OptionDescription.of(Component.literal("Maximum angular offset (degrees) from crosshair to place blocks. Paper servers enforce strict raytrace bounds (3°-15°).")))
+                            .binding(10.0, { config.maxAngleDelta }, { config.maxAngleDelta = it })
+                            .controller { opt -> DoubleSliderControllerBuilder.create(opt).range(3.0, 15.0).step(0.5) }
+                            .build()
+                    )
+                    .option(
                         Option.createBuilder<Boolean>()
                             .name(Component.literal("Show HUD Overlay"))
                             .description(OptionDescription.of(Component.literal("Display printer stats on screen.")))
