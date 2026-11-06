@@ -17,39 +17,56 @@ import kotlin.math.sqrt
  */
 object BuildOrderPlanner {
 
-    private val ATTACHED_BLOCK_PREFIXES = setOf(
-        "minecraft:torch",
-        "minecraft:wall_torch",
-        "minecraft:redstone_wire",
-        "minecraft:repeater",
-        "minecraft:comparator",
-        "minecraft:lever",
-        "minecraft:stone_button",
-        "minecraft:oak_button",
-        "minecraft:ladder",
-        "minecraft:rail",
-        "minecraft:powered_rail",
-        "minecraft:detector_rail",
-        "minecraft:activator_rail"
-    )
-
-    private val GRAVITY_BLOCKS = setOf(
-        "minecraft:sand",
-        "minecraft:red_sand",
-        "minecraft:gravel",
-        "minecraft:anvil",
-        "minecraft:chipped_anvil",
-        "minecraft:damaged_anvil"
-    )
-
-    fun isAttachedBlock(blockId: String): Boolean {
-        val clean = blockId.lowercase()
-        return ATTACHED_BLOCK_PREFIXES.any { clean.startsWith(it) }
+    fun cleanBlockId(raw: String): String {
+        var s = raw.lowercase().trim()
+        if (s.startsWith("block{") && s.endsWith("}")) {
+            s = s.substring(6, s.length - 1).trim()
+        }
+        if (!s.contains(":")) {
+            s = "minecraft:$s"
+        }
+        return s
     }
 
-    fun isGravityBlock(blockId: String): Boolean {
-        val clean = blockId.lowercase()
-        return GRAVITY_BLOCKS.contains(clean) || clean.endsWith("_concrete_powder")
+    fun isAttachedBlock(rawBlockId: String): Boolean {
+        val clean = cleanBlockId(rawBlockId)
+        val path = clean.substringAfter(':')
+
+        // Guard against false positive on decorative plants
+        if (path == "torchflower" || path == "torchflower_crop") return false
+
+        return path.endsWith("_button") ||
+               path.endsWith("_pressure_plate") ||
+               path.endsWith("_carpet") ||
+               path.endsWith("_banner") ||
+               path.endsWith("_sign") ||
+               path.endsWith("_rail") ||
+               path == "redstone_wire" ||
+               path == "repeater" ||
+               path == "comparator" ||
+               path == "lever" ||
+               path == "ladder" ||
+               path == "tripwire_hook" ||
+               path == "torch" ||
+               path == "wall_torch" ||
+               path == "soul_torch" ||
+               path == "soul_wall_torch" ||
+               path == "redstone_torch" ||
+               path == "redstone_wall_torch"
+    }
+
+    fun isGravityBlock(rawBlockId: String): Boolean {
+        val clean = cleanBlockId(rawBlockId)
+        val path = clean.substringAfter(':')
+        return path == "sand" ||
+               path == "red_sand" ||
+               path == "gravel" ||
+               path == "anvil" ||
+               path == "chipped_anvil" ||
+               path == "damaged_anvil" ||
+               path.endsWith("_concrete_powder") ||
+               path == "dragon_egg" ||
+               path == "pointed_dripstone"
     }
 
     /**

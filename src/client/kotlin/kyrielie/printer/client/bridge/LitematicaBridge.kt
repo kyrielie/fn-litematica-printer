@@ -35,6 +35,7 @@ object LitematicaBridge {
     )
 
     private val LAYER_RANGE_CANDIDATES = listOf(
+        "fi.dy.masa.malilib.util.LayerRange",
         "fi.dy.masa.litematica.util.LayerRange",
         "litematica.util.LayerRange"
     )
@@ -110,8 +111,16 @@ object LitematicaBridge {
         if (!isAvailable()) return true
         return try {
             val range = getRenderLayerRangeMethod?.invoke(null) ?: return true
-            isPositionWithinRangeMethod?.invoke(range, pos) as? Boolean ?: true
-        } catch (e: Exception) {
+            var method = isPositionWithinRangeMethod
+            if (method == null) {
+                // Dynamically resolve on runtime instance class (G-6)
+                method = range.javaClass.methods.firstOrNull {
+                    it.name == "isPositionWithinRange" && it.parameterCount == 1
+                }
+                isPositionWithinRangeMethod = method
+            }
+            method?.invoke(range, pos) as? Boolean ?: true
+        } catch (_: Exception) {
             true
         }
     }

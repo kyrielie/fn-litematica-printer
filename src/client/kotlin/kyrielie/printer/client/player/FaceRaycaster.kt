@@ -21,14 +21,45 @@ sealed class FaceRaycastResult {
 
 object FaceRaycaster {
 
-    // 5-point face sampling inspired by Baritone's aabbSideMultipliers
+    // 8-point face sampling: standard 5 interior points + 3 upper edge samples for forward bridging
     private val UV_SAMPLES = arrayOf(
         Pair(0.5, 0.5),   // Center
         Pair(0.15, 0.5),  // Left-mid
         Pair(0.85, 0.5),  // Right-mid
         Pair(0.5, 0.15),  // Mid-bottom
-        Pair(0.5, 0.85)   // Mid-top
+        Pair(0.5, 0.85),  // Mid-top
+        Pair(0.5, 0.92),  // Upper perimeter edge (bridging)
+        Pair(0.2, 0.92),  // Upper-left edge
+        Pair(0.8, 0.92)   // Upper-right edge
     )
+
+    /**
+     * Determines whether right-clicking a block triggers an in-world interaction / container GUI (F-05).
+     */
+    fun isInteractiveBlock(state: net.minecraft.world.level.block.state.BlockState): Boolean {
+        val block = state.block
+        return block is net.minecraft.world.level.block.BaseEntityBlock ||
+               block is net.minecraft.world.level.block.CraftingTableBlock ||
+               block is net.minecraft.world.level.block.DoorBlock ||
+               block is net.minecraft.world.level.block.TrapdoorBlock ||
+               block is net.minecraft.world.level.block.FenceGateBlock ||
+               block is net.minecraft.world.level.block.ButtonBlock ||
+               block is net.minecraft.world.level.block.LeverBlock ||
+               block is net.minecraft.world.level.block.DiodeBlock ||
+               block is net.minecraft.world.level.block.NoteBlock ||
+               block is net.minecraft.world.level.block.JukeboxBlock ||
+               block is net.minecraft.world.level.block.AnvilBlock ||
+               block is net.minecraft.world.level.block.GrindstoneBlock ||
+               block is net.minecraft.world.level.block.LoomBlock ||
+               block is net.minecraft.world.level.block.CartographyTableBlock ||
+               block is net.minecraft.world.level.block.SmithingTableBlock ||
+               block is net.minecraft.world.level.block.StonecutterBlock ||
+               block is net.minecraft.world.level.block.LecternBlock ||
+               block is net.minecraft.world.level.block.BellBlock ||
+               block is net.minecraft.world.level.block.CrafterBlock ||
+               block is net.minecraft.world.level.block.RespawnAnchorBlock ||
+               block is net.minecraft.world.level.block.DaylightDetectorBlock
+    }
 
     /**
      * Searches for a valid, unobstructed neighbor block face to place [targetPos] against.
@@ -44,7 +75,13 @@ object FaceRaycaster {
         val failureLog = ArrayList<String>()
         var foundAnySolidNeighbor = false
 
-        for (dir in Direction.entries) {
+        // F-05: Prioritize non-interactive solid blocks first to prevent accidental container opening
+        val sortedDirs = Direction.entries.sortedBy { dir ->
+            val neighborState = world.getBlockState(targetPos.relative(dir))
+            if (isInteractiveBlock(neighborState)) 1 else 0
+        }
+
+        for (dir in sortedDirs) {
             val neighborPos = targetPos.relative(dir)
             val neighborState = world.getBlockState(neighborPos)
 
@@ -72,12 +109,13 @@ object FaceRaycaster {
                     continue
                 }
 
-                // Geometric facing check: allow glancing angles (dot >= -0.15)
+                // Geometric facing check: allow glancing angles (dot >= -0.15, or -0.45 when looking down at upper horizontal edge)
                 val dot = (eyePos.x - hitVec.x) * clickedFace.stepX +
                           (eyePos.y - hitVec.y) * clickedFace.stepY +
                           (eyePos.z - hitVec.z) * clickedFace.stepZ
-                if (dot < -0.15) {
-                    failureLog.add("Neighbor $clickedFace @ $neighborPos: backface dot=${"%.2f".format(dot)}")
+                val minDot = if (clickedFace.axis.isHorizontal && eyePos.y > hitVec.y && v >= 0.85) -0.45 else -0.15
+                if (dot < minDot) {
+                    failureLog.add("Neighbor $clickedFace @ $neighborPos: backface dot=${"%.2f".format(dot)} < min $minDot")
                     continue
                 }
 
@@ -99,7 +137,7 @@ object FaceRaycaster {
 
                 val clipHit = world.clip(clipCtx)
                 if (clipHit.type == HitResult.Type.BLOCK) {
-                    if (clipHit.blockPos == neighborPos && clipHit.direction == clickedFace) {
+                    if (clipHit.blockPos == neighborPos && (clipHit.direction == clickedFace || (clickedFace.axis.isHorizontal && clipHit.direction == Direction.UP && v >= 0.85))) {
                         return FaceRaycastResult.Success(VisiblePlacementFace(neighborPos, clickedFace, hitVec))
                     } else {
                         failureLog.add("Neighbor $clickedFace @ $neighborPos: occluded by ${clipHit.blockPos} (face=${clipHit.direction})")

@@ -14,8 +14,12 @@ public abstract class ClientCommonPacketListenerImplMixin {
 
     @Inject(method = "send(Lnet/minecraft/network/protocol/Packet;)V", at = @At("HEAD"))
     private void printer$onSendPacket(Packet<?> packet, CallbackInfo ci) {
-        if (packet instanceof ServerboundUseItemOnPacket usePacket) {
-            ServerTelemetryTracker.INSTANCE.onOutgoingUseItemOn(usePacket);
+        try {
+            kyrielie.printer.client.player.ProtocolMovementGuard.INSTANCE.observeOutgoing(packet);
+            if (packet instanceof ServerboundUseItemOnPacket usePacket) {
+                ServerTelemetryTracker.INSTANCE.onOutgoingUseItemOn(usePacket);
+            }
+        } catch (Throwable ignored) {
         }
     }
 }

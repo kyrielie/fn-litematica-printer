@@ -82,19 +82,70 @@ object PrinterController {
         }
     }
 
+    fun setActive(active: Boolean) {
+        if (isRunning != active) {
+            toggle()
+        }
+    }
+
+    /**
+     * Suppresses modal SignEditScreen popups (G-12) when signs are placed by the printer.
+     */
+    fun isSignEditorSuppressed(pos: BlockPos): Boolean {
+        if (!isRunning) return false
+        return PlacementCache.isCached(pos)
+    }
+
+    /**
+     * Unified operational safety guard (G-2 + Claude review).
+     * Prevents placement while typing in chat, menus, screens, or in non-controllable states.
+     */
+    fun canOperate(mc: Minecraft, player: LocalPlayer): Boolean {
+        if (!isRunning || !ConfigManager.config.enabled) return false
+        if (mc.screen != null) return false
+        if (player.isSpectator) return false
+        if (player.isUsingItem) return false
+        if (player.isPassenger) return false
+        if (!player.isAlive) return false
+        if (mc.isPaused) return false
+        if (rollbackCooldownTicks > 0) return false
+        return true
+    }
+
+    /**
+     * F-08 Failure isolation handler. Safely terminates printing and alerts the user
+     * if an unexpected error occurs during packet injection.
+     */
+    fun handleFatalError(context: String, throwable: Throwable) {
+        logger.error("Fatal error during $context; automatically disabling printer to prevent crash loop", throwable)
+        isRunning = false
+        pendingAction = null
+        pendingOverride = null
+        try {
+            val mc = Minecraft.getInstance()
+            mc.player?.displayClientMessage(
+                net.minecraft.network.chat.Component.literal("§c[Printer] Error in $context: ${throwable.message}. Printer auto-disabled."),
+                false
+            )
+        } catch (_: Throwable) {}
+    }
+
     /**
      * Called at the HEAD of LocalPlayer.sendPosition() via LocalPlayerMixin.
      * Decouples client camera angle from outgoing server movement packet (Approach C).
      */
     @JvmStatic
     fun getActiveLookOverride(player: LocalPlayer): LookOverride? {
-        if (!isRunning || !ConfigManager.config.enabled) return null
+        val mc = Minecraft.getInstance()
+        if (!canOperate(mc, player)) {
+            pendingAction = null
+            pendingOverride = null
+            return null
+        }
         if (ConfigManager.config.placementMode != PlacementMode.DECOUPLED_PACKET) return null
-        if (rollbackCooldownTicks > 0) return null
 
         if (pendingOverride != null) return pendingOverride
 
-        val mc = Minecraft.getInstance()
         val world = mc.level ?: return null
 
         val velocity = player.deltaMovement
@@ -109,6 +160,8 @@ object PrinterController {
         val aimDelta = when (action) {
             is PlacementAction.PlaceBlock -> action.aimVec.subtract(eyePos)
             is PlacementAction.MultiClick -> action.aimVec.subtract(eyePos)
+            is PlacementAction.TransformBlock -> action.aimVec.subtract(eyePos)
+            is PlacementAction.ClearObstacle -> action.aimVec.subtract(eyePos)
             is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.subtract(eyePos)
         }
         val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
@@ -127,7 +180,7 @@ object PrinterController {
         val world = mc.level ?: return
         val gameMode = mc.gameMode ?: return
 
-        if (!isRunning || !ConfigManager.config.enabled) {
+        if (!canOperate(mc, player)) {
             pendingAction = null
             pendingOverride = null
             return
@@ -150,12 +203,30 @@ object PrinterController {
                     budget = 0
                 }
                 if (budget > 0) {
+                    val schematicWorld = LitematicaBridge.getSchematicWorld()
                     val eyePos = Vec3(player.x, player.y + player.getEyeHeight(), player.z)
                     while (budget > 0) {
                         val secondaryAction = planNextAction(mc, player, world, eyePos) ?: break
+
+                        // F-09 Safety Gate: Do not batch directional blocks under another block's look angle.
+                        // Server-side facing is derived from the look packet; directional blocks must wait for their own tick.
+                        if (secondaryAction is PlacementAction.PlaceBlock && schematicWorld != null) {
+                            val schemState = schematicWorld.getBlockState(secondaryAction.targetPos)
+                            val isDirectional = schemState.hasProperty(BlockStateProperties.FACING) ||
+                                                schemState.hasProperty(BlockStateProperties.HORIZONTAL_FACING) ||
+                                                schemState.hasProperty(BlockStateProperties.AXIS) ||
+                                                schemState.hasProperty(BlockStateProperties.SLAB_TYPE) ||
+                                                schemState.hasProperty(BlockStateProperties.HALF)
+                            if (isDirectional) {
+                                break
+                            }
+                        }
+
                         val secDelta = when (secondaryAction) {
                             is PlacementAction.PlaceBlock -> secondaryAction.aimVec.subtract(eyePos)
                             is PlacementAction.MultiClick -> secondaryAction.aimVec.subtract(eyePos)
+                            is PlacementAction.TransformBlock -> secondaryAction.aimVec.subtract(eyePos)
+                            is PlacementAction.ClearObstacle -> secondaryAction.aimVec.subtract(eyePos)
                             is PlacementAction.ScaffoldSequence -> secondaryAction.site.anchorFace.hitVec.subtract(eyePos)
                         }
                         val (secYaw, secPitch) = deltaToYawPitch(secDelta.x, secDelta.y, secDelta.z)
@@ -206,7 +277,7 @@ object PrinterController {
             lastSecondTimestamp = now
         }
 
-        if (!isRunning || !ConfigManager.config.enabled) return
+        if (!canOperate(mc, player)) return
 
         // 4. Server rollback detection (held item count unexpectedly jumping upward)
         val currentSlot = player.inventory.selectedSlot
@@ -267,6 +338,8 @@ object PrinterController {
         val aimDelta = when (action) {
             is PlacementAction.PlaceBlock -> action.aimVec.subtract(eyePos)
             is PlacementAction.MultiClick -> action.aimVec.subtract(eyePos)
+            is PlacementAction.TransformBlock -> action.aimVec.subtract(eyePos)
+            is PlacementAction.ClearObstacle -> action.aimVec.subtract(eyePos)
             is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.subtract(eyePos)
         }
         val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
@@ -301,6 +374,8 @@ object PrinterController {
         val aimDelta = when (action) {
             is PlacementAction.PlaceBlock -> action.aimVec.subtract(eyePos)
             is PlacementAction.MultiClick -> action.aimVec.subtract(eyePos)
+            is PlacementAction.TransformBlock -> action.aimVec.subtract(eyePos)
+            is PlacementAction.ClearObstacle -> action.aimVec.subtract(eyePos)
             is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.subtract(eyePos)
         }
         val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
@@ -356,7 +431,10 @@ object PrinterController {
                 for (dz in -reachCeil..reachCeil) {
                     val pos = BlockPos(pPos.x + dx, pPos.y + dy, pPos.z + dz)
 
-                    if (pos.distToCenterSqr(player.x, player.y, player.z) <= 0.8) continue
+                    // F-01 Fix: Player AABB intersection check allows blocks under feet while strictly rejecting head & body
+                    val blockAabb = net.minecraft.world.phys.AABB(pos)
+                    if (player.boundingBox.intersects(blockAabb)) continue
+
                     if (pos.distToCenterSqr(eyePos.x, eyePos.y, eyePos.z) > (reach * reach)) continue
                     if (!LitematicaBridge.isPositionWithinRenderLayers(pos)) continue
 
@@ -365,10 +443,12 @@ object PrinterController {
                     if (schemState.isAir || schemState == worldState) continue
                     if (PlacementCache.isCached(pos)) continue
 
+                    // F-07 Fix: Extract clean registered block key instead of Block.toString()
+                    val blockId = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(schemState.block).toString()
                     rawCandidates.add(
                         PlacementTarget(
                             pos.x, pos.y, pos.z,
-                            schemState.block.toString()
+                            blockId
                         )
                     )
                 }
@@ -377,11 +457,19 @@ object PrinterController {
 
         if (rawCandidates.isEmpty()) return null
 
+        // Phase 11: Strict Layer-by-Layer Synchronization
+        val candidatesToProcess = if (ConfigManager.config.strictLayerSync) {
+            val minY = rawCandidates.minOf { it.y }
+            rawCandidates.filter { it.y == minY }
+        } else {
+            rawCandidates
+        }
+
         val crosshairHit = mc.hitResult as? BlockHitResult
         val crosshairBlock = crosshairHit?.blockPos
 
         val sorted = BuildOrderPlanner.sortCandidates(
-            rawCandidates,
+            candidatesToProcess,
             player.x,
             player.y,
             player.z,
@@ -437,12 +525,20 @@ object PrinterController {
     ) {
         when (action) {
             is PlacementAction.PlaceBlock -> {
+                // G-3: Prepare item on hotbar strictly inside executeAction
+                val preparedHand = InventoryRestockManager.prepareItem(mc, player, action.requiredItem) ?: action.hand
+                val ping = mc.connection?.getPlayerInfo(player.uuid)?.latency ?: 50
+                val dynamicLease = PlacementCache.computeDynamicLease(ping)
+
+                // G-4: Explicitly notify telemetry of intended targetPos and aim angle
+                ServerTelemetryTracker.setNextExpectedPlacement(action.targetPos, override.yaw, override.pitch)
+
                 val dist = action.aimVec.distanceTo(player.eyePosition)
                 val yawDiff = abs(wrapDegrees(override.yaw - player.yRot))
                 val pitchDiff = abs(override.pitch - player.xRot)
                 val angularDelta = sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
 
-                val result = gameMode.useItemOn(player, action.hand, action.hitResult)
+                val result = gameMode.useItemOn(player, preparedHand, action.hitResult)
 
                 if (ConfigManager.config.debugLogging) {
                     logger.info(
@@ -470,8 +566,8 @@ object PrinterController {
                 )
 
                 if (result.consumesAction()) {
-                    PlacementCache.markPlaced(action.targetPos, PlacementCache.DEFAULT_TIMEOUT_MS)
-                    player.swing(action.hand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
+                    PlacementCache.markPlaced(action.targetPos, dynamicLease)
+                    player.swing(preparedHand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
                     totalPlaced++
                     placementCounterThisSec++
 
@@ -480,24 +576,87 @@ object PrinterController {
                     lastTrackedSlot = activeSlot
                     lastExpectedItemCount = activeCount
                 } else {
-                    PlacementCache.markPlaced(action.targetPos, 400L)
+                    PlacementCache.markPlaced(action.targetPos, dynamicLease.coerceAtMost(600L))
                 }
             }
             is PlacementAction.MultiClick -> {
                 if (ConfigManager.config.enableMultiClick) {
-                    for (i in 0 until action.clickCount) {
+                    // F-06 Fix: Rate limit multi-clicks per tick to avoid packet bursts
+                    val clicksToExecute = min(action.clickCount, 4)
+                    for (i in 0 until clicksToExecute) {
                         val result = gameMode.useItemOn(player, action.hand, action.hitResult)
                         if (result.consumesAction()) {
                             player.swing(action.hand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
                         }
                     }
-                    PlacementCache.markPlaced(action.targetPos, PlacementCache.DEFAULT_TIMEOUT_MS)
+                    val remainingClicks = action.clickCount - clicksToExecute
+                    if (remainingClicks > 0) {
+                        PlacementCache.markPlaced(action.targetPos, 150L)
+                    } else {
+                        PlacementCache.markPlaced(action.targetPos, PlacementCache.DEFAULT_TIMEOUT_MS)
+                    }
                     totalPlaced++
                     placementCounterThisSec++
                 }
             }
+            is PlacementAction.TransformBlock -> {
+                // Phase 8: Equip tool matching predicate (axe/hoe) and interact in-place
+                val preparedHand = InventoryRestockManager.prepareItem(mc, player, action.toolPredicate) ?: action.hand
+                ServerTelemetryTracker.setNextExpectedPlacement(action.targetPos, override.yaw, override.pitch)
+                val result = gameMode.useItemOn(player, preparedHand, action.hitResult)
+                if (result.consumesAction()) {
+                    player.swing(preparedHand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
+                    PlacementCache.markPlaced(action.targetPos, 250L)
+                    totalPlaced++
+                    placementCounterThisSec++
+                }
+            }
+            is PlacementAction.ClearObstacle -> {
+                // Phase 9: Switch to best tool on hotbar and dispatch instant break for soft debris
+                if (player.inventory.selectedSlot != action.bestSlot) {
+                    player.inventory.selectedSlot = action.bestSlot
+                    player.connection.send(net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket(action.bestSlot))
+                }
+                player.connection.send(
+                    net.minecraft.network.protocol.game.ServerboundPlayerActionPacket(
+                        net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                        action.targetPos,
+                        net.minecraft.core.Direction.UP
+                    )
+                )
+                player.connection.send(
+                    net.minecraft.network.protocol.game.ServerboundPlayerActionPacket(
+                        net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK,
+                        action.targetPos,
+                        net.minecraft.core.Direction.UP
+                    )
+                )
+                player.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
+                PlacementCache.markPlaced(action.targetPos, 200L)
+            }
             is PlacementAction.ScaffoldSequence -> {
-                // Future scaffolding expansion
+                // Phase 7: Two-step scaffolding placement execution
+                val scaffoldName = ConfigManager.config.scaffoldBlockItem
+                val scaffoldId = net.minecraft.resources.Identifier.tryParse(scaffoldName)
+                    ?: net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "dirt")
+                val scaffoldItem = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(scaffoldId)
+                val preparedHand = InventoryRestockManager.prepareItem(mc, player, scaffoldItem) ?: action.scaffoldHand
+                val scaffoldHit = BlockHitResult(
+                    action.site.anchorFace.hitVec,
+                    action.site.anchorFace.clickedFace,
+                    action.site.anchorFace.placeAgainstPos,
+                    false
+                )
+                val result = gameMode.useItemOn(player, preparedHand, scaffoldHit)
+                if (result.consumesAction()) {
+                    player.swing(preparedHand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
+                    PlacementCache.markPlaced(action.site.scaffoldPos, 300L)
+                    PlacementCache.markPlaced(action.targetPos, 150L)
+                    totalPlaced++
+                    placementCounterThisSec++
+                } else {
+                    PlacementCache.markPlaced(action.targetPos, 500L)
+                }
             }
         }
     }

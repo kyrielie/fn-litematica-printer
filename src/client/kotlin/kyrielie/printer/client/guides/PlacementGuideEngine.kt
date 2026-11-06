@@ -25,7 +25,8 @@ sealed class PlacementAction {
         val hitResult: BlockHitResult,
         val hand: InteractionHand,
         val targetPos: BlockPos,
-        val aimVec: Vec3
+        val aimVec: Vec3,
+        val requiredItem: net.minecraft.world.item.Item
     ) : PlacementAction()
 
     data class MultiClick(
@@ -34,6 +35,20 @@ sealed class PlacementAction {
         val targetPos: BlockPos,
         val clickCount: Int,
         val aimVec: Vec3
+    ) : PlacementAction()
+
+    data class TransformBlock(
+        val hitResult: BlockHitResult,
+        val hand: InteractionHand,
+        val targetPos: BlockPos,
+        val aimVec: Vec3,
+        val toolPredicate: (net.minecraft.world.item.ItemStack) -> Boolean
+    ) : PlacementAction()
+
+    data class ClearObstacle(
+        val targetPos: BlockPos,
+        val aimVec: Vec3,
+        val bestSlot: Int
     ) : PlacementAction()
 
     data class ScaffoldSequence(
@@ -47,6 +62,42 @@ sealed class PlacementAction {
 object PlacementGuideEngine {
 
     /**
+     * Checks if a schematic state is the secondary slave component of a multi-block structure (G-7).
+     * Upper doors, bed heads, and tall flower uppers are placed automatically with the base.
+     */
+    fun isMultiBlockSlavePart(state: BlockState): Boolean {
+        if (state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)) {
+            if (state.getValue(BlockStateProperties.DOUBLE_BLOCK_HALF) == net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER) {
+                return true
+            }
+        }
+        if (state.hasProperty(BlockStateProperties.BED_PART)) {
+            if (state.getValue(BlockStateProperties.BED_PART) == net.minecraft.world.level.block.state.properties.BedPart.HEAD) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Determines whether a block is soft natural debris suitable for surgical clearing (Phase 9).
+     */
+    fun isNaturalDebris(state: BlockState): Boolean {
+        val b = state.block
+        return b == net.minecraft.world.level.block.Blocks.SHORT_GRASS ||
+               b == net.minecraft.world.level.block.Blocks.TALL_GRASS ||
+               b == net.minecraft.world.level.block.Blocks.FERN ||
+               b == net.minecraft.world.level.block.Blocks.LARGE_FERN ||
+               b == net.minecraft.world.level.block.Blocks.DEAD_BUSH ||
+               b == net.minecraft.world.level.block.Blocks.VINE ||
+               b == net.minecraft.world.level.block.Blocks.SNOW ||
+               b == net.minecraft.world.level.block.Blocks.HANGING_ROOTS ||
+               b == net.minecraft.world.level.block.Blocks.DANDELION ||
+               b == net.minecraft.world.level.block.Blocks.POPPY ||
+               b.descriptionId.contains("flower")
+    }
+
+    /**
      * Inspects discrepancies between real world state and schematic state at [pos]
      * and constructs the appropriate [PlacementAction].
      */
@@ -57,11 +108,14 @@ object PlacementGuideEngine {
         eyePos: Vec3,
         pos: BlockPos,
         schematicState: BlockState,
-        useCarpetProtocol: Boolean = true,
-        enableScaffolding: Boolean = true,
+        useCarpetProtocol: Boolean = false,
+        enableScaffolding: Boolean = false,
         maxReach: Double = 4.5,
         debug: Boolean = false
     ): PlacementAction? {
+        // G-7: Skip secondary multi-block components
+        if (isMultiBlockSlavePart(schematicState)) return null
+
         val currentState = world.getBlockState(pos)
 
         // 1. Check if the block is already placed but needs state progression
@@ -80,19 +134,73 @@ object PlacementGuideEngine {
             return null
         }
 
-        // 2. Must be replaceable or air in the real world
+        // 2. Check for in-place block transformations (Phase 8: log stripping, tilling, waxing)
+        if (!currentState.isAir && currentState.block != schematicState.block) {
+            val transform = kyrielie.printer.client.interaction.BlockTransformationRegistry.getRequiredTransformation(currentState, schematicState)
+            if (transform != null) {
+                val centerVec = Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)
+                val hitResult = BlockHitResult(centerVec, Direction.UP, pos, false)
+                when (transform) {
+                    is kyrielie.printer.client.interaction.TransformationAction.ToolInteraction -> {
+                        if (InventoryRestockManager.hasItem(player, transform.toolPredicate)) {
+                            return PlacementAction.TransformBlock(
+                                hitResult,
+                                InteractionHand.MAIN_HAND,
+                                pos,
+                                centerVec,
+                                transform.toolPredicate
+                            )
+                        }
+                    }
+                    is kyrielie.printer.client.interaction.TransformationAction.ItemInteraction -> {
+                        if (InventoryRestockManager.hasItem(player, transform.requiredItem)) {
+                            return PlacementAction.PlaceBlock(
+                                hitResult,
+                                InteractionHand.MAIN_HAND,
+                                pos,
+                                centerVec,
+                                transform.requiredItem
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Phase 9: Surgical Obstacle Clearing for soft natural debris
+            if (isNaturalDebris(currentState)) {
+                val toolSet = kyrielie.printer.client.mining.ToolSet(
+                    player,
+                    kyrielie.printer.client.config.ConfigManager.config.itemSaver,
+                    kyrielie.printer.client.config.ConfigManager.config.itemSaverThreshold
+                )
+                val bestSlot = toolSet.getBestSlot(currentState)
+                val centerVec = Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)
+                return PlacementAction.ClearObstacle(pos, centerVec, bestSlot)
+            }
+        }
+
+        // Must be replaceable or air in the real world
         if (!currentState.isAir && !currentState.canBeReplaced()) {
             if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: world block ${currentState.block} is not air/replaceable")
             return null
         }
 
-        // 3. Resolve required item to place this block
+        // Redstone & Gravity Contextual Safety Gates (Phase 10)
+        val schemWorld = LitematicaBridge.getSchematicWorld()
+        if (schemWorld != null) {
+            if (!kyrielie.printer.client.safety.RedstoneSafetyEngine.isSafeToPlace(world, schemWorld, pos, schematicState)) {
+                if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: redstone/gravity safety gate blocked placement")
+                return null
+            }
+        }
+
+        // 3. Resolve required item to place this block (G-3 pure non-mutating check)
         val item = schematicState.block.asItem()
-        val hand = InventoryRestockManager.prepareItem(mc, player, item)
-        if (hand == null) {
+        if (!InventoryRestockManager.hasItem(player, item)) {
             if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: item $item not found in inventory!")
             return null
         }
+        val hand = InventoryRestockManager.getPreferredHand(player, item)
 
         // 4. Try standard solid-neighbor face placement
         val raycastResult = FaceRaycaster.findPlacementFaceWithDiagnostics(world, player, eyePos, pos, maxReach)
@@ -100,6 +208,33 @@ object PlacementGuideEngine {
             val placementFace = raycastResult.face
             var hitVec = placementFace.hitVec
             val realHitVec = placementFace.hitVec
+
+            // G-9: Non-Carpet pillar axis face constraint
+            if (!useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.AXIS)) {
+                val reqAxis = schematicState.getValue(BlockStateProperties.AXIS)
+                if (placementFace.clickedFace.axis != reqAxis) {
+                    if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: clicked face ${placementFace.clickedFace} axis does not match required pillar axis $reqAxis")
+                    return null
+                }
+            }
+
+            // G-10: Slabs and stairs half boundary alignment
+            if (!useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.SLAB_TYPE)) {
+                val slabType = schematicState.getValue(BlockStateProperties.SLAB_TYPE)
+                if (slabType == net.minecraft.world.level.block.state.properties.SlabType.BOTTOM) {
+                    if (placementFace.clickedFace == Direction.DOWN) return null
+                } else if (slabType == net.minecraft.world.level.block.state.properties.SlabType.TOP) {
+                    if (placementFace.clickedFace == Direction.UP) return null
+                }
+            }
+            if (!useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.HALF)) {
+                val half = schematicState.getValue(BlockStateProperties.HALF)
+                if (half == net.minecraft.world.level.block.state.properties.Half.BOTTOM) {
+                    if (placementFace.clickedFace == Direction.DOWN) return null
+                } else if (half == net.minecraft.world.level.block.state.properties.Half.TOP) {
+                    if (placementFace.clickedFace == Direction.UP) return null
+                }
+            }
 
             if (useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.FACING)) {
                 val facing = schematicState.getValue(BlockStateProperties.FACING)
@@ -121,7 +256,7 @@ object PlacementGuideEngine {
                 placementFace.placeAgainstPos,
                 false
             )
-            return PlacementAction.PlaceBlock(hitResult, hand, pos, realHitVec)
+            return PlacementAction.PlaceBlock(hitResult, hand, pos, realHitVec, item)
         } else if (raycastResult is FaceRaycastResult.Failure) {
             if (debug) {
                 val reasons = raycastResult.reasons.take(3).joinToString("; ")
@@ -134,8 +269,8 @@ object PlacementGuideEngine {
             val site = ScaffoldHelper.findScaffoldSite(world, player, eyePos, pos, maxReach)
             if (site != null) {
                 val scaffoldItem = net.minecraft.world.item.Items.DIRT
-                val scaffoldHand = InventoryRestockManager.prepareItem(mc, player, scaffoldItem)
-                if (scaffoldHand != null) {
+                if (InventoryRestockManager.hasItem(player, scaffoldItem)) {
+                    val scaffoldHand = InventoryRestockManager.getPreferredHand(player, scaffoldItem)
                     return PlacementAction.ScaffoldSequence(site, scaffoldHand, hand, pos)
                 }
             }
@@ -161,6 +296,29 @@ object PlacementGuideEngine {
             val curNote = current.getValue(NoteBlock.NOTE)
             val tarNote = target.getValue(NoteBlock.NOTE)
             return (tarNote - curNote + 25) % 25
+        }
+
+        // Multi-click snow layer stacking (references/PlacementGuide.java line 330)
+        if (current.hasProperty(BlockStateProperties.LAYERS) && target.hasProperty(BlockStateProperties.LAYERS)) {
+            val curLayers = current.getValue(BlockStateProperties.LAYERS)
+            val tarLayers = target.getValue(BlockStateProperties.LAYERS)
+            if (tarLayers > curLayers) {
+                return tarLayers - curLayers
+            }
+        }
+
+        // Trapdoor and fence gate toggles (references/PlacementGuide.java line 370)
+        if (current.hasProperty(BlockStateProperties.OPEN) && target.hasProperty(BlockStateProperties.OPEN)) {
+            val curOpen = current.getValue(BlockStateProperties.OPEN)
+            val tarOpen = target.getValue(BlockStateProperties.OPEN)
+            if (curOpen != tarOpen) return 1
+        }
+
+        // Lever state toggles (references/PlacementGuide.java line 345)
+        if (current.hasProperty(BlockStateProperties.POWERED) && target.hasProperty(BlockStateProperties.POWERED)) {
+            val curPowered = current.getValue(BlockStateProperties.POWERED)
+            val tarPowered = target.getValue(BlockStateProperties.POWERED)
+            if (curPowered != tarPowered) return 1
         }
 
         return 0

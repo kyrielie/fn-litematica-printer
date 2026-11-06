@@ -30,6 +30,25 @@ object PrinterYaclConfig {
                             .build()
                     )
                     .option(
+                        Option.createBuilder<KeyTriggerMode>()
+                            .name(Component.literal("Key Trigger Mode"))
+                            .description(
+                                OptionDescription.of(
+                                    Component.literal("Toggle: Click once to activate, click again to stop.\nHold to Print: Active strictly while keybind is physically held.")
+                                )
+                            )
+                            .binding(KeyTriggerMode.TOGGLE, { config.triggerMode }, { config.triggerMode = it })
+                            .controller { opt ->
+                                EnumDropdownControllerBuilder.create(opt).formatValue { mode ->
+                                    when (mode) {
+                                        KeyTriggerMode.TOGGLE -> Component.literal("Toggle")
+                                        KeyTriggerMode.HOLD_TO_PRINT -> Component.literal("Hold to Print")
+                                    }
+                                }
+                            }
+                            .build()
+                    )
+                    .option(
                         Option.createBuilder<PlacementMode>()
                             .name(Component.literal("Placement Look Mode"))
                             .description(

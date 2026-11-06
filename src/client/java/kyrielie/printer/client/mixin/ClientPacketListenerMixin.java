@@ -39,4 +39,11 @@ public abstract class ClientPacketListenerMixin {
     private void printer$onSystemChat(ClientboundSystemChatPacket packet, CallbackInfo ci) {
         ServerTelemetryTracker.INSTANCE.onSystemChat(packet.content(), packet.overlay());
     }
+
+    @Inject(method = "handleOpenSignEditor", at = @At("HEAD"), cancellable = true)
+    private void printer$onOpenSignEditor(net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket packet, CallbackInfo ci) {
+        if (kyrielie.printer.client.player.PrinterController.INSTANCE.isSignEditorSuppressed(packet.getPos())) {
+            ci.cancel();
+        }
+    }
 }

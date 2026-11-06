@@ -27,18 +27,22 @@ public abstract class LocalPlayerMixin extends AbstractClientPlayer {
 
     @Inject(method = "sendPosition", at = @At("HEAD"))
     private void printer$onSendPositionHead(CallbackInfo ci) {
-        LocalPlayer self = (LocalPlayer) (Object) this;
-        PrinterController.LookOverride override = PrinterController.INSTANCE.getActiveLookOverride(self);
-        if (override != null) {
-            this.printer$savedYaw = this.getYRot();
-            this.printer$savedPitch = this.getXRot();
-            this.setYRot(override.getYaw());
-            this.setXRot(override.getPitch());
+        try {
+            LocalPlayer self = (LocalPlayer) (Object) this;
+            PrinterController.LookOverride override = PrinterController.INSTANCE.getActiveLookOverride(self);
+            if (override != null) {
+                this.printer$savedYaw = this.getYRot();
+                this.printer$savedPitch = this.getXRot();
+                this.setYRot(override.getYaw());
+                this.setXRot(override.getPitch());
 
-            // Guarantee deltaYRot != 0.0 in sendPosition so the rotation is definitely transmitted
-            if (this.yRotLast == override.getYaw() && this.xRotLast == override.getPitch()) {
-                this.yRotLast = override.getYaw() + 0.001f;
+                // Guarantee deltaYRot != 0.0 in sendPosition so the rotation is definitely transmitted
+                if (this.yRotLast == override.getYaw() && this.xRotLast == override.getPitch()) {
+                    this.yRotLast = override.getYaw() + 0.001f;
+                }
             }
+        } catch (Throwable t) {
+            PrinterController.INSTANCE.handleFatalError("LocalPlayerMixin.sendPosition(HEAD)", t);
         }
     }
 
@@ -52,8 +56,14 @@ public abstract class LocalPlayerMixin extends AbstractClientPlayer {
                 this.printer$savedYaw = null;
                 this.printer$savedPitch = null;
             }
+        } catch (Throwable t) {
+            PrinterController.INSTANCE.handleFatalError("LocalPlayerMixin.sendPosition(RETURN/restore)", t);
         } finally {
-            PrinterController.INSTANCE.onAfterSendPosition(self);
+            try {
+                PrinterController.INSTANCE.onAfterSendPosition(self);
+            } catch (Throwable t) {
+                PrinterController.INSTANCE.handleFatalError("LocalPlayerMixin.sendPosition(RETURN/after)", t);
+            }
         }
     }
 }
