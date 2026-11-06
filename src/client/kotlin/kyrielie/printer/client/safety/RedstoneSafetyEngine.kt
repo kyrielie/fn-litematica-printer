@@ -6,8 +6,8 @@ import net.minecraft.core.Direction
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.block.Blocks
 import net.minecraft.world.level.block.ObserverBlock
-import net.minecraft.world.level.block.PistonBaseBlock
-import net.minecraft.world.level.block.RedStoneWireBlock
+import net.minecraft.world.level.block.piston.PistonBaseBlock
+import net.minecraft.world.level.block.RedstoneWireBlock
 import net.minecraft.world.level.block.state.BlockState
 import net.minecraft.world.level.block.state.properties.BlockStateProperties
 
@@ -103,6 +103,6 @@ object RedstoneSafetyEngine {
     private fun isPulseSensitive(state: BlockState): Boolean {
         val b = state.block
         return b is PistonBaseBlock || b == Blocks.DISPENSER || b == Blocks.DROPPER ||
-               b == Blocks.TNT || b is RedStoneWireBlock
+               b == Blocks.TNT || b is RedstoneWireBlock
     }
 }

@@ -5,6 +5,7 @@ import kyrielie.printer.client.config.ConfigManager
 import kyrielie.printer.client.config.PlacementMode
 import kyrielie.printer.client.guides.PlacementAction
 import kyrielie.printer.client.guides.PlacementGuideEngine
+import kyrielie.printer.client.telemetry.ServerTelemetryTracker
 import kyrielie.printer.model.PlacementTarget
 import kyrielie.printer.planner.BuildOrderPlanner
 import kyrielie.printer.util.deltaToYawPitch
@@ -14,13 +15,17 @@ import net.minecraft.client.multiplayer.MultiPlayerGameMode
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
+import net.minecraft.world.InteractionHand
+import net.minecraft.world.item.Items
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.block.Blocks
+import net.minecraft.world.level.block.state.properties.BlockStateProperties
 import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.Vec3
 import org.slf4j.LoggerFactory
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.min
 import kotlin.math.sqrt
 
 data class LastPlacementRecord(
@@ -102,7 +107,7 @@ object PrinterController {
      */
     fun canOperate(mc: Minecraft, player: LocalPlayer): Boolean {
         if (!isRunning || !ConfigManager.config.enabled) return false
-        if (mc.screen != null) return false
+        if (mc.gui.screen() != null) return false
         if (player.isSpectator) return false
         if (player.isUsingItem) return false
         if (player.isPassenger) return false
@@ -123,9 +128,8 @@ object PrinterController {
         pendingOverride = null
         try {
             val mc = Minecraft.getInstance()
-            mc.player?.displayClientMessage(
-                net.minecraft.network.chat.Component.literal("§c[Printer] Error in $context: ${throwable.message}. Printer auto-disabled."),
-                false
+            mc.player?.sendSystemMessage(
+                net.minecraft.network.chat.Component.literal("§c[Printer] Error in $context: ${throwable.message}. Printer auto-disabled.")
             )
         } catch (_: Throwable) {}
     }
@@ -282,7 +286,8 @@ object PrinterController {
         // 4. Server rollback detection (held item count unexpectedly jumping upward)
         val currentSlot = player.inventory.selectedSlot
         val currentCount = player.inventory.getItem(currentSlot).count
-        if (currentSlot == lastTrackedSlot && lastExpectedItemCount > 0 && currentCount > lastExpectedItemCount) {
+        val hasInFlight = ServerTelemetryTracker.hasInFlightPlacements()
+        if (currentSlot == lastTrackedSlot && lastExpectedItemCount > 0 && currentCount > lastExpectedItemCount && !hasInFlight) {
             val rec = lastPlacementRecord
             val recDetails = if (rec != null) {
                 "Last placement at ${rec.pos} (clicked ${rec.face} on ${rec.placeAgainst}) " +
@@ -385,6 +390,8 @@ object PrinterController {
         val dist = when (action) {
             is PlacementAction.PlaceBlock -> action.aimVec.distanceTo(eyePos)
             is PlacementAction.MultiClick -> action.hitResult.location.distanceTo(eyePos)
+            is PlacementAction.TransformBlock -> action.aimVec.distanceTo(eyePos)
+            is PlacementAction.ClearObstacle -> action.aimVec.distanceTo(eyePos)
             is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.distanceTo(eyePos)
         }
         val blockAngularRadius = Math.toDegrees(kotlin.math.atan2(0.65, dist)).toFloat()
@@ -395,6 +402,8 @@ object PrinterController {
         val targetPos = when (action) {
             is PlacementAction.PlaceBlock -> action.targetPos
             is PlacementAction.MultiClick -> action.targetPos
+            is PlacementAction.TransformBlock -> action.targetPos
+            is PlacementAction.ClearObstacle -> action.targetPos
             is PlacementAction.ScaffoldSequence -> action.targetPos
         }
         val isDirectCrosshair = crosshairBlock != null && (
@@ -639,7 +648,8 @@ object PrinterController {
                 val scaffoldName = ConfigManager.config.scaffoldBlockItem
                 val scaffoldId = net.minecraft.resources.Identifier.tryParse(scaffoldName)
                     ?: net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "dirt")
-                val scaffoldItem = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(scaffoldId)
+                val scaffoldOptional = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(scaffoldId)
+                val scaffoldItem = scaffoldOptional.map { it.value() }.orElse(Items.DIRT)
                 val preparedHand = InventoryRestockManager.prepareItem(mc, player, scaffoldItem) ?: action.scaffoldHand
                 val scaffoldHit = BlockHitResult(
                     action.site.anchorFace.hitVec,

@@ -1,5 +1,6 @@
 package kyrielie.printer.client.guides
 
+import kyrielie.printer.client.bridge.LitematicaBridge
 import kyrielie.printer.client.player.FaceRaycaster
 import kyrielie.printer.client.player.FaceRaycastResult
 import kyrielie.printer.client.player.InventoryRestockManager
@@ -181,7 +182,7 @@ object PlacementGuideEngine {
 
         // Must be replaceable or air in the real world
         if (!currentState.isAir && !currentState.canBeReplaced()) {
-            if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: world block ${currentState.block} is not air/replaceable")
+            if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: world block ${currentState.block} is not air/replaceable")
             return null
         }
 
@@ -189,7 +190,7 @@ object PlacementGuideEngine {
         val schemWorld = LitematicaBridge.getSchematicWorld()
         if (schemWorld != null) {
             if (!kyrielie.printer.client.safety.RedstoneSafetyEngine.isSafeToPlace(world, schemWorld, pos, schematicState)) {
-                if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: redstone/gravity safety gate blocked placement")
+                if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: redstone/gravity safety gate blocked placement")
                 return null
             }
         }
@@ -197,7 +198,7 @@ object PlacementGuideEngine {
         // 3. Resolve required item to place this block (G-3 pure non-mutating check)
         val item = schematicState.block.asItem()
         if (!InventoryRestockManager.hasItem(player, item)) {
-            if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: item $item not found in inventory!")
+            if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: item $item not found in inventory!")
             return null
         }
         val hand = InventoryRestockManager.getPreferredHand(player, item)
@@ -213,7 +214,7 @@ object PlacementGuideEngine {
             if (!useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.AXIS)) {
                 val reqAxis = schematicState.getValue(BlockStateProperties.AXIS)
                 if (placementFace.clickedFace.axis != reqAxis) {
-                    if (debug) PrinterController.logger.debug("[Printer Debug] $pos rejected: clicked face ${placementFace.clickedFace} axis does not match required pillar axis $reqAxis")
+                    if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: clicked face ${placementFace.clickedFace} axis does not match required pillar axis $reqAxis")
                     return null
                 }
             }
@@ -260,7 +261,7 @@ object PlacementGuideEngine {
         } else if (raycastResult is FaceRaycastResult.Failure) {
             if (debug) {
                 val reasons = raycastResult.reasons.take(3).joinToString("; ")
-                PrinterController.logger.debug("[Printer Debug] $pos rejected: $reasons")
+                PrinterController.logger.info("[Printer Debug] $pos rejected: $reasons")
             }
         }
 

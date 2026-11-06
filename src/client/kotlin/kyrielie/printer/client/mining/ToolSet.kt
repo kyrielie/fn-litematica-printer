@@ -1,8 +1,10 @@
 package kyrielie.printer.client.mining
 
 import net.minecraft.client.player.LocalPlayer
+import net.minecraft.core.BlockPos
 import net.minecraft.world.effect.MobEffects
 import net.minecraft.world.item.ItemStack
+import net.minecraft.world.level.BlockGetter
 import net.minecraft.world.level.block.state.BlockState
 
 /**
@@ -18,7 +20,7 @@ class ToolSet(
     /**
      * Determines the optimal hotbar slot (0..8) to break [state], strictly honoring [itemSaver].
      */
-    fun getBestSlot(state: BlockState): Int {
+    fun getBestSlot(state: BlockState, pos: BlockPos = BlockPos.ZERO, level: BlockGetter = player.level()): Int {
         var bestSlot = player.inventory.selectedSlot
         var highestSpeed = Double.NEGATIVE_INFINITY
         var lowestCost = Int.MAX_VALUE
@@ -35,7 +37,7 @@ class ToolSet(
                 }
             }
 
-            val speed = calculateSpeedVsBlock(itemStack, state)
+            val speed = calculateSpeedVsBlock(itemStack, state, level, pos)
             val cost = getMaterialCost(itemStack)
             if (speed > highestSpeed) {
                 highestSpeed = speed
@@ -66,9 +68,14 @@ class ToolSet(
     /**
      * Calculates block mining speed in progress-per-tick using Minecraft's exact break formula.
      */
-    fun calculateSpeedVsBlock(item: ItemStack, state: BlockState): Double {
+    fun calculateSpeedVsBlock(
+        item: ItemStack,
+        state: BlockState,
+        level: BlockGetter = player.level(),
+        pos: BlockPos = BlockPos.ZERO
+    ): Double {
         val hardness = try {
-            state.getDestroySpeed(null, null)
+            state.getDestroySpeed(level, pos)
         } catch (_: Exception) {
             return -1.0
         }
@@ -88,11 +95,11 @@ class ToolSet(
 
     private fun potionAmplifier(): Double {
         var speed = 1.0
-        val haste = player.getEffect(MobEffects.DIG_SPEED)
+        val haste = player.getEffect(MobEffects.HASTE)
         if (haste != null) {
             speed *= 1.0 + (haste.amplifier + 1) * 0.2
         }
-        val fatigue = player.getEffect(MobEffects.DIG_SLOWDOWN)
+        val fatigue = player.getEffect(MobEffects.MINING_FATIGUE)
         if (fatigue != null) {
             speed *= when (fatigue.amplifier) {
                 0 -> 0.3
