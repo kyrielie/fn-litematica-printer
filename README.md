@@ -1,4 +1,4 @@
-# FN Litematica Printer
+# fn-litematica-printer
 
 <p align="center">
   <img src="src/main/resources/assets/litematica_printer/icon.png" alt="FN Litematica Printer Icon" width="128" height="128" />
@@ -14,7 +14,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="MIT License" /></a>
 </p>
 
-A next-generation standalone Fabric client mod for **Minecraft 26.3** that automates block placement from loaded **Litematica** schematics with strict anti-cheat compliance, moving-player motion compensation, decoupled look synchronization, and autonomous scaffolding.
+Yet another Litematica printer mod.
 
 ---
 
@@ -22,7 +22,7 @@ A next-generation standalone Fabric client mod for **Minecraft 26.3** that autom
 
 - **Decoupled Packet Look Synchronization (Approach C)**: Synchronizes the player's look direction with the server via the primary per-tick movement packet (`LocalPlayer.sendPosition()`). Your screen never snaps, camera view is completely untouched, WASD movement is unimpeded, and the server receives exact raycast orientations on every placement.
 - **Three Placement Modes**:
-  1. `DECOUPLED_PACKET` *(Default & Recommended)*: Server packet look alignment; camera untouched, movement unimpeded, 98%+ placement confirmation rate on Paper/Spigot anti-cheats.
+  1. `DECOUPLED_PACKET` *(Default & Recommended)*: Server packet look alignment; camera untouched, movement unimpeded, 98%+ placement confirmation rate.
   2. `CROSSHAIR_SWEEP`: Passive placement; only places blocks when your crosshair naturally sweeps across valid block faces within a configured angle threshold (3°–15°).
   3. `AIM_ASSIST`: Smoothly guides your physical camera towards target blocks before placing.
 - **Dynamic Motion Compensation**: Forward-projects player eye position based on velocity vectors (`player.deltaMovement * 0.5`) to eliminate "out of reach" and "line of sight" rejections while walking, sprinting, or flying.
