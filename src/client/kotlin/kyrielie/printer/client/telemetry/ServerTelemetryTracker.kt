@@ -38,6 +38,13 @@ object ServerTelemetryTracker {
     private val inFlightBySeq = ConcurrentHashMap<Int, InFlightPlacement>()
     private val inFlightByPos = ConcurrentHashMap<BlockPos, InFlightPlacement>()
 
+    @Volatile
+    private var pendingExplicitTarget: Pair<BlockPos, Pair<Float, Float>>? = null
+
+    fun setNextExpectedPlacement(targetPos: BlockPos, aimYaw: Float, aimPitch: Float) {
+        pendingExplicitTarget = Pair(targetPos, Pair(aimYaw, aimPitch))
+    }
+
     fun onOutgoingUseItemOn(packet: ServerboundUseItemOnPacket) {
         val mc = Minecraft.getInstance()
         val player = mc.player ?: return
@@ -45,7 +52,17 @@ object ServerTelemetryTracker {
         val hit = packet.hitResult
         val placeAgainst = hit.blockPos
         val face = hit.direction
-        val targetPos = placeAgainst.relative(face)
+
+        // G-4: Use explicit targetPos if set by executeAction; otherwise handle replaceable blocks
+        val explicit = pendingExplicitTarget
+        pendingExplicitTarget = null
+        val targetPos = explicit?.first ?: run {
+            val worldState = mc.level?.getBlockState(placeAgainst)
+            if (worldState != null && worldState.canBeReplaced()) placeAgainst else placeAgainst.relative(face)
+        }
+        val aimYaw = explicit?.second?.first ?: player.yRot
+        val aimPitch = explicit?.second?.second ?: player.xRot
+
         val eyePos = player.eyePosition
         val hitVec = hit.location
         val dist = hitVec.distanceTo(eyePos)
@@ -58,8 +75,8 @@ object ServerTelemetryTracker {
             face = face,
             hitVec = hitVec,
             eyePos = eyePos,
-            sentAimYaw = player.yRot,
-            sentAimPitch = player.xRot,
+            sentAimYaw = aimYaw,
+            sentAimPitch = aimPitch,
             cameraYaw = player.yRot,
             cameraPitch = player.xRot,
             distance = dist,

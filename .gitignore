@@ -37,3 +37,15 @@ CLAUDE.md
 
 # Source images / design assets
 fern.png
+
+# Plans and review documentation
+PLAN.md
+REVIEW_CONTEXT.md
+
+# Packaging and review scripts
+scripts/
+create_review_bundle.sh
+make_upload_zip.sh
+
+# Review bundles and archive outputs
+*.zip

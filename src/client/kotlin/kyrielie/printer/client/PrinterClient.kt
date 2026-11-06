@@ -38,25 +38,33 @@ class PrinterClient : ClientModInitializer {
 
         // Register Client Tick
         ClientTickEvents.END_CLIENT_TICK.register { mc ->
-            while (toggleKey.consumeClick()) {
-                PrinterController.toggle()
-                ConfigManager.config.enabled = PrinterController.isRunning
-                ConfigManager.save()
+            if (ConfigManager.config.triggerMode == kyrielie.printer.client.config.KeyTriggerMode.HOLD_TO_PRINT) {
+                val isDown = toggleKey.isDown
+                if (isDown != PrinterController.isRunning) {
+                    PrinterController.setActive(isDown)
+                    ConfigManager.config.enabled = isDown
+                }
+            } else {
+                while (toggleKey.consumeClick()) {
+                    PrinterController.toggle()
+                    ConfigManager.config.enabled = PrinterController.isRunning
+                    ConfigManager.save()
 
-                val status = if (PrinterController.isRunning) "ENABLED" else "DISABLED"
-                val bridgeStatus = if (LitematicaBridge.isAvailable()) "Linked" else "Standalone"
+                    val status = if (PrinterController.isRunning) "ENABLED" else "DISABLED"
+                    val bridgeStatus = if (LitematicaBridge.isAvailable()) "Linked" else "Standalone"
 
-                // Print comprehensive status directly to the console
-                logger.info("==================================================")
-                logger.info("[Printer] TOGGLE -> $status | Litematica Bridge: $bridgeStatus")
-                logger.info("[Printer] Config: mode=${ConfigManager.config.placementMode}, reach=${ConfigManager.config.survivalReachLimit}, budget=${ConfigManager.config.blocksPerTick}, maxAngle=${ConfigManager.config.maxAngleDelta}°, carpet=${ConfigManager.config.carpetProtocol}, scaffold=${ConfigManager.config.enableScaffolding}")
-                logger.info("==================================================")
+                    // Print comprehensive status directly to the console
+                    logger.info("==================================================")
+                    logger.info("[Printer] TOGGLE -> $status | Litematica Bridge: $bridgeStatus")
+                    logger.info("[Printer] Config: mode=${ConfigManager.config.placementMode}, reach=${ConfigManager.config.survivalReachLimit}, budget=${ConfigManager.config.blocksPerTick}, maxAngle=${ConfigManager.config.maxAngleDelta}°, carpet=${ConfigManager.config.carpetProtocol}, scaffold=${ConfigManager.config.enableScaffolding}")
+                    logger.info("==================================================")
 
-                // Brief in-game action bar confirmation
-                val chatColor = if (PrinterController.isRunning) "§a" else "§c"
-                mc.player?.sendOverlayMessage(
-                    Component.literal("§6[Printer] $chatColor$status §7(Litematica: $bridgeStatus)")
-                )
+                    // Brief in-game action bar confirmation
+                    val chatColor = if (PrinterController.isRunning) "§a" else "§c"
+                    mc.player?.sendOverlayMessage(
+                        Component.literal("§6[Printer] $chatColor$status §7(Litematica: $bridgeStatus)")
+                    )
+                }
             }
 
             PrinterController.onClientTick(mc)

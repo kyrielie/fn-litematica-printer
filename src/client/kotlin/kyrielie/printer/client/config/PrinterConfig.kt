@@ -12,15 +12,34 @@ enum class PlacementMode {
     AIM_ASSIST          // Approach B: Smoothly steers physical camera towards target block
 }
 
+enum class KeyTriggerMode {
+    TOGGLE,             // Click keybind to toggle running state
+    HOLD_TO_PRINT       // Active only while keybind is physically held down
+}
+
+enum class ScaffoldPreferredFace {
+    UNDERSIDE,          // Downward backing for ceilings and thin floors
+    INTERIOR_AUTO,      // Prioritizes hollow interior cavities
+    TOP,                // Upward backing
+    ANY                 // Any valid adjacent neighbor face
+}
+
 data class PrinterConfig(
     var enabled: Boolean = false,
     var survivalReachLimit: Double = 4.5,
     var blocksPerTick: Int = 2,
-    var carpetProtocol: Boolean = true,
-    var enableScaffolding: Boolean = true,
+    var carpetProtocol: Boolean = false,
+    var enableScaffolding: Boolean = false,
+    var scaffoldPreferredFace: ScaffoldPreferredFace = ScaffoldPreferredFace.UNDERSIDE,
+    var scaffoldBlockItem: String = "minecraft:dirt",
+    var removeScaffolding: Boolean = false,
     var enableMultiClick: Boolean = true,
+    var itemSaver: Boolean = true,
+    var itemSaverThreshold: Int = 10,
+    var strictLayerSync: Boolean = false,
     var maxAngleDelta: Double = 10.0,
     var placementMode: PlacementMode = PlacementMode.DECOUPLED_PACKET,
+    var triggerMode: KeyTriggerMode = KeyTriggerMode.TOGGLE,
     var debugLogging: Boolean = false
 ) {
     fun sanitize() {

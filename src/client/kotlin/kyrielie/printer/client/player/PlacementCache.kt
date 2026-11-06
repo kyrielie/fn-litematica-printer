@@ -18,6 +18,15 @@ object PlacementCache {
     private val cache = ConcurrentHashMap<BlockPos, Long>()
     const val DEFAULT_TIMEOUT_MS = 400L
 
+    /**
+     * G-5: Dynamically scales placement lease by player ping to prevent duplicate
+     * placement spam under high latency or low TPS conditions.
+     */
+    fun computeDynamicLease(playerPing: Int): Long {
+        val ping = if (playerPing > 0) playerPing else 50
+        return maxOf(400L, (ping * 2.5).toLong() + 200L).coerceAtMost(3000L)
+    }
+
     fun isCached(pos: BlockPos): Boolean {
         val expiry = cache[pos] ?: return false
         val now = System.currentTimeMillis()

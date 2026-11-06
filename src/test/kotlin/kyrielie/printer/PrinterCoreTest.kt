@@ -186,4 +186,71 @@ class PrinterCoreTest {
 
         assertEquals(crosshairTarget, sorted[0], "Neighbor face crosshair target must be prioritized")
     }
+
+    @Test
+    fun testBlockIdNormalizationAndAttachedTypes() {
+        // Test Mojmap Block.toString() input formats (F-07)
+        assertTrue(BuildOrderPlanner.isAttachedBlock("Block{minecraft:torch}"))
+        assertTrue(BuildOrderPlanner.isAttachedBlock("Block{minecraft:wall_torch}"))
+        assertTrue(BuildOrderPlanner.isAttachedBlock("Block{minecraft:oak_button}"))
+        assertTrue(BuildOrderPlanner.isAttachedBlock("Block{minecraft:stone_pressure_plate}"))
+        assertTrue(BuildOrderPlanner.isAttachedBlock("Block{minecraft:white_carpet}"))
+        assertTrue(BuildOrderPlanner.isAttachedBlock("Block{minecraft:red_banner}"))
+        assertTrue(BuildOrderPlanner.isAttachedBlock("Block{minecraft:oak_sign}"))
+        assertTrue(BuildOrderPlanner.isAttachedBlock("Block{minecraft:powered_rail}"))
+
+        // Torchflower and normal solid blocks must NOT be marked attached
+        assertFalse(BuildOrderPlanner.isAttachedBlock("Block{minecraft:torchflower}"))
+        assertFalse(BuildOrderPlanner.isAttachedBlock("Block{minecraft:stone}"))
+        assertFalse(BuildOrderPlanner.isAttachedBlock("Block{minecraft:oak_planks}"))
+
+        // Gravity blocks
+        assertTrue(BuildOrderPlanner.isGravityBlock("Block{minecraft:sand}"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("Block{minecraft:gravel}"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("Block{minecraft:white_concrete_powder}"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("Block{minecraft:anvil}"))
+        assertFalse(BuildOrderPlanner.isGravityBlock("Block{minecraft:stone}"))
+    }
+
+    @Test
+    fun testBuildOrderWithMojmapBlockStrings() {
+        val targets = listOf(
+            PlacementTarget(0, 5, 0, "Block{minecraft:torch}"),
+            PlacementTarget(0, 5, 1, "Block{minecraft:stone}"),
+            PlacementTarget(0, 5, 2, "Block{minecraft:sand}")
+        )
+
+        val sorted = BuildOrderPlanner.sortCandidates(targets, 0.0, 5.0, 0.0)
+        // Solid stone must be placed before attached torch and gravity sand
+        assertEquals("Block{minecraft:stone}", sorted[0].blockId)
+    }
+
+    @Test
+    fun testBuildOrderMultiLayerAscending() {
+        val targets = listOf(
+            PlacementTarget(0, 62, 0, "minecraft:stone"),
+            PlacementTarget(0, 60, 0, "minecraft:redstone_wire"),
+            PlacementTarget(0, 60, 1, "minecraft:stone"),
+            PlacementTarget(0, 61, 0, "minecraft:sand"),
+            PlacementTarget(0, 61, 1, "minecraft:stone")
+        )
+
+        val sorted = BuildOrderPlanner.sortCandidates(targets, 0.0, 60.0, 0.0)
+        // Layer 60 solid stone must be #1, followed by layer 60 redstone wire
+        assertEquals(60, sorted[0].y)
+        assertEquals("minecraft:stone", sorted[0].blockId)
+
+        assertEquals(60, sorted[1].y)
+        assertEquals("minecraft:redstone_wire", sorted[1].blockId)
+
+        // Then layer 61 solid stone before layer 61 gravity sand
+        assertEquals(61, sorted[2].y)
+        assertEquals("minecraft:stone", sorted[2].blockId)
+
+        assertEquals(61, sorted[3].y)
+        assertEquals("minecraft:sand", sorted[3].blockId)
+
+        // Finally layer 62
+        assertEquals(62, sorted[4].y)
+    }
 }
