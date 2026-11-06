@@ -45,6 +45,8 @@ object ServerTelemetryTracker {
         pendingExplicitTarget = Pair(targetPos, Pair(aimYaw, aimPitch))
     }
 
+    fun hasInFlightPlacements(): Boolean = inFlightBySeq.isNotEmpty() || inFlightByPos.isNotEmpty()
+
     fun onOutgoingUseItemOn(packet: ServerboundUseItemOnPacket) {
         val mc = Minecraft.getInstance()
         val player = mc.player ?: return

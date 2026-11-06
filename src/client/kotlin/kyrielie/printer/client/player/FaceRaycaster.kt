@@ -41,7 +41,7 @@ object FaceRaycaster {
         return block is net.minecraft.world.level.block.BaseEntityBlock ||
                block is net.minecraft.world.level.block.CraftingTableBlock ||
                block is net.minecraft.world.level.block.DoorBlock ||
-               block is net.minecraft.world.level.block.TrapdoorBlock ||
+               block is net.minecraft.world.level.block.TrapDoorBlock ||
                block is net.minecraft.world.level.block.FenceGateBlock ||
                block is net.minecraft.world.level.block.ButtonBlock ||
                block is net.minecraft.world.level.block.LeverBlock ||
@@ -99,8 +99,8 @@ object FaceRaycaster {
                     Direction.DOWN  -> Vec3(neighborPos.x + u, neighborPos.y.toDouble(), neighborPos.z + v)
                     Direction.NORTH -> Vec3(neighborPos.x + u, neighborPos.y + v, neighborPos.z.toDouble())
                     Direction.SOUTH -> Vec3(neighborPos.x + u, neighborPos.y + v, neighborPos.z + 1.0)
-                    Direction.WEST  -> Vec3(neighborPos.x.toDouble(), neighborPos.y + u, neighborPos.z + v)
-                    Direction.EAST  -> Vec3(neighborPos.x + 1.0, neighborPos.y + u, neighborPos.z + v)
+                    Direction.WEST  -> Vec3(neighborPos.x.toDouble(), neighborPos.y + v, neighborPos.z + u)
+                    Direction.EAST  -> Vec3(neighborPos.x + 1.0, neighborPos.y + v, neighborPos.z + u)
                 }
 
                 val dist = hitVec.distanceTo(eyePos)

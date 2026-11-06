@@ -42,7 +42,7 @@ public abstract class ClientPacketListenerMixin {
 
     @Inject(method = "handleOpenSignEditor", at = @At("HEAD"), cancellable = true)
     private void printer$onOpenSignEditor(net.minecraft.network.protocol.game.ClientboundOpenSignEditorPacket packet, CallbackInfo ci) {
-        if (kyrielie.printer.client.player.PrinterController.INSTANCE.isSignEditorSuppressed(packet.getPos())) {
+        if (kyrielie.printer.client.player.PrinterController.INSTANCE.isSignEditorSuppressed(packet.pos())) {
             ci.cancel();
         }
     }
