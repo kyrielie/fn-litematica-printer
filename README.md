@@ -16,6 +16,8 @@
 
 Yet another Litematica printer mod.
 
+Depends on [Litematica](https://modrinth.com/mod/litematica) and [YACL](https://modrinth.com/mod/yacl).
+
 ---
 
 ## Key Features
