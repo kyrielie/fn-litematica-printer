@@ -107,10 +107,22 @@ object LitematicaBridge {
         }
     }
 
+    private var cachedRenderLayerRange: Any? = null
+    private var lastRangeQueryTime: Long = 0L
+
     fun isPositionWithinRenderLayers(pos: BlockPos): Boolean {
         if (!isAvailable()) return true
         return try {
-            val range = getRenderLayerRangeMethod?.invoke(null) ?: return true
+            val now = System.currentTimeMillis()
+            val range = if (now - lastRangeQueryTime < 50L && cachedRenderLayerRange != null) {
+                cachedRenderLayerRange
+            } else {
+                val fetched = getRenderLayerRangeMethod?.invoke(null)
+                cachedRenderLayerRange = fetched
+                lastRangeQueryTime = now
+                fetched
+            } ?: return true
+
             var method = isPositionWithinRangeMethod
             if (method == null) {
                 // Dynamically resolve on runtime instance class (G-6)

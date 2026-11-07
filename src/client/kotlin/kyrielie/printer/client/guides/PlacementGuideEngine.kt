@@ -257,62 +257,6 @@ object PlacementGuideEngine {
             val isPiston = schematicState.block is net.minecraft.world.level.block.piston.PistonBaseBlock
             val isTrapdoor = schematicState.block is net.minecraft.world.level.block.TrapDoorBlock
 
-            if (isTrapdoor) {
-                val reqFacing = schematicState.getValue(BlockStateProperties.HORIZONTAL_FACING)
-                val reqHalf = schematicState.getValue(BlockStateProperties.HALF)
-                if (placementFace.clickedFace.axis.isHorizontal) {
-                    // When clicking a horizontal face, vanilla sets FACING = clickedFace
-                    if (placementFace.clickedFace != reqFacing) {
-                        if (debug) PrinterController.logger.info("[Printer Debug] $pos trapdoor rejected: clicked face ${placementFace.clickedFace} != required facing $reqFacing")
-                        return null
-                    }
-                    val targetYOffset = if (reqHalf == net.minecraft.world.level.block.state.properties.Half.TOP) 0.75 else 0.25
-                    hitVec = Vec3(hitVec.x, placementFace.placeAgainstPos.y + targetYOffset, hitVec.z)
-                } else {
-                    // When clicking UP or DOWN, vanilla sets FACING = player.getDirection().opposite
-                    val targetFacing = reqFacing.opposite
-                    forcedYaw = when (targetFacing) {
-                        Direction.SOUTH -> 0f
-                        Direction.WEST -> 90f
-                        Direction.NORTH -> 180f
-                        Direction.EAST -> -90f
-                        else -> null
-                    }
-                }
-            } else if (schematicState.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
-                val reqFacing = schematicState.getValue(BlockStateProperties.HORIZONTAL_FACING)
-                // Vanilla placement orientation logic:
-                // Stairs, repeaters, comparators, doors derive facing directly from player look:
-                // facing = player.getDirection()
-                // Observers and pistons face opposite of player look:
-                // facing = player.getDirection().opposite
-                val targetFacing = if (isObserver || isPiston) reqFacing.opposite else reqFacing
-                forcedYaw = when (targetFacing) {
-                    Direction.SOUTH -> 0f
-                    Direction.WEST -> 90f
-                    Direction.NORTH -> 180f
-                    Direction.EAST -> -90f
-                    else -> null
-                }
-            } else if (schematicState.hasProperty(BlockStateProperties.FACING)) {
-                val reqFacing = schematicState.getValue(BlockStateProperties.FACING)
-                val targetFacing = if (isObserver || isPiston) reqFacing.opposite else reqFacing
-                if (targetFacing.axis.isHorizontal) {
-                    forcedYaw = when (targetFacing) {
-                        Direction.SOUTH -> 0f
-                        Direction.WEST -> 90f
-                        Direction.NORTH -> 180f
-                        Direction.EAST -> -90f
-                        else -> null
-                    }
-                    forcedPitch = 0f
-                } else if (targetFacing == Direction.UP) {
-                    forcedPitch = -90f
-                } else if (targetFacing == Direction.DOWN) {
-                    forcedPitch = 90f
-                }
-            }
-
             // Half-boundary alignment for stairs and slabs
             if (schematicState.hasProperty(BlockStateProperties.HALF) && !isTrapdoor) {
                 val half = schematicState.getValue(BlockStateProperties.HALF)
@@ -333,18 +277,72 @@ object PlacementGuideEngine {
                 }
             }
 
-            if (effectiveCarpet && schematicState.hasProperty(BlockStateProperties.FACING)) {
-                val facing = schematicState.getValue(BlockStateProperties.FACING)
-                val facingId = CarpetProtocol.getFacingId(facing.name)
-                val rawHitX = hitVec.x - placementFace.placeAgainstPos.x
-                val encodedX = CarpetProtocol.applyCarpetProtocolV2(placementFace.placeAgainstPos.x, rawHitX, facingId)
-                hitVec = Vec3(encodedX, hitVec.y, hitVec.z)
-            } else if (effectiveCarpet && schematicState.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
-                val facing = schematicState.getValue(BlockStateProperties.HORIZONTAL_FACING)
-                val facingId = CarpetProtocol.getFacingId(facing.name)
-                val rawHitX = hitVec.x - placementFace.placeAgainstPos.x
-                val encodedX = CarpetProtocol.applyCarpetProtocolV2(placementFace.placeAgainstPos.x, rawHitX, facingId)
-                hitVec = Vec3(encodedX, hitVec.y, hitVec.z)
+            if (effectiveCarpet) {
+                if (schematicState.hasProperty(BlockStateProperties.FACING)) {
+                    val facing = schematicState.getValue(BlockStateProperties.FACING)
+                    val facingId = CarpetProtocol.getFacingId(facing.name)
+                    val rawHitX = hitVec.x - placementFace.placeAgainstPos.x
+                    val encodedX = CarpetProtocol.applyCarpetProtocolV2(placementFace.placeAgainstPos.x, rawHitX, facingId)
+                    hitVec = Vec3(encodedX, hitVec.y, hitVec.z)
+                } else if (schematicState.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
+                    val facing = schematicState.getValue(BlockStateProperties.HORIZONTAL_FACING)
+                    val facingId = CarpetProtocol.getFacingId(facing.name)
+                    val rawHitX = hitVec.x - placementFace.placeAgainstPos.x
+                    val encodedX = CarpetProtocol.applyCarpetProtocolV2(placementFace.placeAgainstPos.x, rawHitX, facingId)
+                    hitVec = Vec3(encodedX, hitVec.y, hitVec.z)
+                }
+            } else {
+                // Vanilla Feasibility Solver (Non-Carpet Fallback - Gap G-8)
+                // Evaluates whether natural line of sight to hitVec produces the required orientation.
+                val naturalAimDelta = realHitVec.subtract(eyePos)
+                val (naturalYaw, naturalPitch) = kyrielie.printer.util.deltaToYawPitch(naturalAimDelta.x, naturalAimDelta.y, naturalAimDelta.z)
+                val naturalFacing = Direction.fromYRot(naturalYaw.toDouble())
+
+                if (isTrapdoor) {
+                    val reqFacing = schematicState.getValue(BlockStateProperties.HORIZONTAL_FACING)
+                    if (placementFace.clickedFace.axis.isHorizontal) {
+                        if (placementFace.clickedFace != reqFacing) {
+                            if (debug) PrinterController.logger.info("[Printer Debug] $pos trapdoor rejected: clicked face ${placementFace.clickedFace} != required facing $reqFacing")
+                            return null
+                        }
+                    } else {
+                        // When clicking UP or DOWN, vanilla sets FACING = player.getDirection().opposite
+                        if (naturalFacing.opposite != reqFacing) {
+                            if (debug) PrinterController.logger.info("[Printer Debug] $pos trapdoor rejected: natural facing ${naturalFacing.opposite} != required facing $reqFacing")
+                            return null
+                        }
+                    }
+                } else if (schematicState.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
+                    val reqFacing = schematicState.getValue(BlockStateProperties.HORIZONTAL_FACING)
+                    val expectedFacing = if (isObserver || isPiston) naturalFacing.opposite else naturalFacing
+                    if (expectedFacing != reqFacing) {
+                        if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: natural facing $expectedFacing != required facing $reqFacing (quadrant infeasible)")
+                        return null
+                    }
+                } else if (schematicState.hasProperty(BlockStateProperties.FACING)) {
+                    val reqFacing = schematicState.getValue(BlockStateProperties.FACING)
+                    if (reqFacing.axis.isHorizontal) {
+                        val expectedFacing = if (isObserver || isPiston) naturalFacing.opposite else naturalFacing
+                        if (expectedFacing != reqFacing || naturalPitch < -45f || naturalPitch > 45f) {
+                            if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: natural facing $expectedFacing != required horizontal facing $reqFacing (quadrant infeasible)")
+                            return null
+                        }
+                    } else if (reqFacing == Direction.UP) {
+                        // Observers and pistons face opposite of look: looking DOWN (pitch > 45°) places facing UP
+                        val targetPitchValid = if (isObserver || isPiston) naturalPitch > 45f else naturalPitch < -45f
+                        if (!targetPitchValid) {
+                            if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: pitch ${"%.1f".format(naturalPitch)}° cannot place vertical facing UP")
+                            return null
+                        }
+                    } else if (reqFacing == Direction.DOWN) {
+                        // Observers and pistons face opposite of look: looking UP (pitch < -45°) places facing DOWN
+                        val targetPitchValid = if (isObserver || isPiston) naturalPitch < -45f else naturalPitch > 45f
+                        if (!targetPitchValid) {
+                            if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: pitch ${"%.1f".format(naturalPitch)}° cannot place vertical facing DOWN")
+                            return null
+                        }
+                    }
+                }
             }
 
             val hitResult = BlockHitResult(
