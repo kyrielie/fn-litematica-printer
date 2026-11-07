@@ -27,7 +27,9 @@ sealed class PlacementAction {
         val hand: InteractionHand,
         val targetPos: BlockPos,
         val aimVec: Vec3,
-        val requiredItem: net.minecraft.world.item.Item
+        val requiredItem: net.minecraft.world.item.Item,
+        val forcedYaw: Float? = null,
+        val forcedPitch: Float? = null
     ) : PlacementAction()
 
     data class MultiClick(
@@ -112,10 +114,19 @@ object PlacementGuideEngine {
         useCarpetProtocol: Boolean = false,
         enableScaffolding: Boolean = false,
         maxReach: Double = 4.5,
-        debug: Boolean = false
+        debug: Boolean = false,
+        allowDecoupledBridge: Boolean = true
     ): PlacementAction? {
         // G-7: Skip secondary multi-block components
         if (isMultiBlockSlavePart(schematicState)) return null
+
+        val effectiveCarpet = if (useCarpetProtocol) {
+            val supported = kyrielie.printer.client.bridge.CarpetProtocolDetector.isCarpetSupported()
+            if (!supported) {
+                kyrielie.printer.client.bridge.CarpetProtocolDetector.warnIfCarpetConfiguredButUnsupported()
+            }
+            supported
+        } else false
 
         val currentState = world.getBlockState(pos)
 
@@ -204,14 +215,14 @@ object PlacementGuideEngine {
         val hand = InventoryRestockManager.getPreferredHand(player, item)
 
         // 4. Try standard solid-neighbor face placement
-        val raycastResult = FaceRaycaster.findPlacementFaceWithDiagnostics(world, player, eyePos, pos, maxReach)
+        val raycastResult = FaceRaycaster.findPlacementFaceWithDiagnostics(world, player, eyePos, pos, maxReach, allowDecoupledBridge)
         if (raycastResult is FaceRaycastResult.Success) {
             val placementFace = raycastResult.face
             var hitVec = placementFace.hitVec
             val realHitVec = placementFace.hitVec
 
             // G-9: Non-Carpet pillar axis face constraint
-            if (!useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.AXIS)) {
+            if (!effectiveCarpet && schematicState.hasProperty(BlockStateProperties.AXIS)) {
                 val reqAxis = schematicState.getValue(BlockStateProperties.AXIS)
                 if (placementFace.clickedFace.axis != reqAxis) {
                     if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: clicked face ${placementFace.clickedFace} axis does not match required pillar axis $reqAxis")
@@ -220,7 +231,7 @@ object PlacementGuideEngine {
             }
 
             // G-10: Slabs and stairs half boundary alignment
-            if (!useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.SLAB_TYPE)) {
+            if (!effectiveCarpet && schematicState.hasProperty(BlockStateProperties.SLAB_TYPE)) {
                 val slabType = schematicState.getValue(BlockStateProperties.SLAB_TYPE)
                 if (slabType == net.minecraft.world.level.block.state.properties.SlabType.BOTTOM) {
                     if (placementFace.clickedFace == Direction.DOWN) return null
@@ -228,7 +239,7 @@ object PlacementGuideEngine {
                     if (placementFace.clickedFace == Direction.UP) return null
                 }
             }
-            if (!useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.HALF)) {
+            if (!effectiveCarpet && schematicState.hasProperty(BlockStateProperties.HALF)) {
                 val half = schematicState.getValue(BlockStateProperties.HALF)
                 if (half == net.minecraft.world.level.block.state.properties.Half.BOTTOM) {
                     if (placementFace.clickedFace == Direction.DOWN) return null
@@ -237,13 +248,98 @@ object PlacementGuideEngine {
                 }
             }
 
-            if (useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.FACING)) {
+            var forcedYaw: Float? = null
+            var forcedPitch: Float? = null
+
+            // Determine required look direction for directional blocks (stairs, repeaters, observers, pistons, trapdoors)
+            val isStair = schematicState.block is net.minecraft.world.level.block.StairBlock
+            val isObserver = schematicState.block is net.minecraft.world.level.block.ObserverBlock
+            val isPiston = schematicState.block is net.minecraft.world.level.block.piston.PistonBaseBlock
+            val isTrapdoor = schematicState.block is net.minecraft.world.level.block.TrapDoorBlock
+
+            if (isTrapdoor) {
+                val reqFacing = schematicState.getValue(BlockStateProperties.HORIZONTAL_FACING)
+                val reqHalf = schematicState.getValue(BlockStateProperties.HALF)
+                if (placementFace.clickedFace.axis.isHorizontal) {
+                    // When clicking a horizontal face, vanilla sets FACING = clickedFace
+                    if (placementFace.clickedFace != reqFacing) {
+                        if (debug) PrinterController.logger.info("[Printer Debug] $pos trapdoor rejected: clicked face ${placementFace.clickedFace} != required facing $reqFacing")
+                        return null
+                    }
+                    val targetYOffset = if (reqHalf == net.minecraft.world.level.block.state.properties.Half.TOP) 0.75 else 0.25
+                    hitVec = Vec3(hitVec.x, placementFace.placeAgainstPos.y + targetYOffset, hitVec.z)
+                } else {
+                    // When clicking UP or DOWN, vanilla sets FACING = player.getDirection().opposite
+                    val targetFacing = reqFacing.opposite
+                    forcedYaw = when (targetFacing) {
+                        Direction.SOUTH -> 0f
+                        Direction.WEST -> 90f
+                        Direction.NORTH -> 180f
+                        Direction.EAST -> -90f
+                        else -> null
+                    }
+                }
+            } else if (schematicState.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
+                val reqFacing = schematicState.getValue(BlockStateProperties.HORIZONTAL_FACING)
+                // Vanilla placement orientation logic:
+                // Stairs, repeaters, comparators, doors derive facing directly from player look:
+                // facing = player.getDirection()
+                // Observers and pistons face opposite of player look:
+                // facing = player.getDirection().opposite
+                val targetFacing = if (isObserver || isPiston) reqFacing.opposite else reqFacing
+                forcedYaw = when (targetFacing) {
+                    Direction.SOUTH -> 0f
+                    Direction.WEST -> 90f
+                    Direction.NORTH -> 180f
+                    Direction.EAST -> -90f
+                    else -> null
+                }
+            } else if (schematicState.hasProperty(BlockStateProperties.FACING)) {
+                val reqFacing = schematicState.getValue(BlockStateProperties.FACING)
+                val targetFacing = if (isObserver || isPiston) reqFacing.opposite else reqFacing
+                if (targetFacing.axis.isHorizontal) {
+                    forcedYaw = when (targetFacing) {
+                        Direction.SOUTH -> 0f
+                        Direction.WEST -> 90f
+                        Direction.NORTH -> 180f
+                        Direction.EAST -> -90f
+                        else -> null
+                    }
+                    forcedPitch = 0f
+                } else if (targetFacing == Direction.UP) {
+                    forcedPitch = -90f
+                } else if (targetFacing == Direction.DOWN) {
+                    forcedPitch = 90f
+                }
+            }
+
+            // Half-boundary alignment for stairs and slabs
+            if (schematicState.hasProperty(BlockStateProperties.HALF) && !isTrapdoor) {
+                val half = schematicState.getValue(BlockStateProperties.HALF)
+                val targetYOffset = if (half == net.minecraft.world.level.block.state.properties.Half.TOP) 0.75 else 0.25
+                if (placementFace.clickedFace.axis.isHorizontal) {
+                    hitVec = Vec3(hitVec.x, placementFace.placeAgainstPos.y + targetYOffset, hitVec.z)
+                }
+            } else if (schematicState.hasProperty(BlockStateProperties.SLAB_TYPE)) {
+                val slabType = schematicState.getValue(BlockStateProperties.SLAB_TYPE)
+                if (slabType == net.minecraft.world.level.block.state.properties.SlabType.TOP) {
+                    if (placementFace.clickedFace.axis.isHorizontal) {
+                        hitVec = Vec3(hitVec.x, placementFace.placeAgainstPos.y + 0.75, hitVec.z)
+                    }
+                } else if (slabType == net.minecraft.world.level.block.state.properties.SlabType.BOTTOM) {
+                    if (placementFace.clickedFace.axis.isHorizontal) {
+                        hitVec = Vec3(hitVec.x, placementFace.placeAgainstPos.y + 0.25, hitVec.z)
+                    }
+                }
+            }
+
+            if (effectiveCarpet && schematicState.hasProperty(BlockStateProperties.FACING)) {
                 val facing = schematicState.getValue(BlockStateProperties.FACING)
                 val facingId = CarpetProtocol.getFacingId(facing.name)
                 val rawHitX = hitVec.x - placementFace.placeAgainstPos.x
                 val encodedX = CarpetProtocol.applyCarpetProtocolV2(placementFace.placeAgainstPos.x, rawHitX, facingId)
                 hitVec = Vec3(encodedX, hitVec.y, hitVec.z)
-            } else if (useCarpetProtocol && schematicState.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
+            } else if (effectiveCarpet && schematicState.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
                 val facing = schematicState.getValue(BlockStateProperties.HORIZONTAL_FACING)
                 val facingId = CarpetProtocol.getFacingId(facing.name)
                 val rawHitX = hitVec.x - placementFace.placeAgainstPos.x
@@ -257,7 +353,7 @@ object PlacementGuideEngine {
                 placementFace.placeAgainstPos,
                 false
             )
-            return PlacementAction.PlaceBlock(hitResult, hand, pos, realHitVec, item)
+            return PlacementAction.PlaceBlock(hitResult, hand, pos, realHitVec, item, forcedYaw, forcedPitch)
         } else if (raycastResult is FaceRaycastResult.Failure) {
             if (debug) {
                 val reasons = raycastResult.reasons.take(3).joinToString("; ")

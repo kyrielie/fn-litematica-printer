@@ -65,10 +65,26 @@ object ServerTelemetryTracker {
         val aimYaw = explicit?.second?.first ?: player.yRot
         val aimPitch = explicit?.second?.second ?: player.xRot
 
+        StairPlacementDebugger.onOutgoingUseItemOn(
+            packet,
+            isManual = (explicit == null),
+            sentAimYaw = explicit?.second?.first,
+            sentAimPitch = explicit?.second?.second
+        )
+
         val eyePos = player.eyePosition
         val hitVec = hit.location
         val dist = hitVec.distanceTo(eyePos)
         val ping = mc.connection?.getPlayerInfo(player.uuid)?.latency ?: -1
+
+        val relHitCenter = hitVec.subtract(Vec3.atCenterOf(placeAgainst))
+        if (kotlin.math.abs(relHitCenter.x) >= 1.0 || kotlin.math.abs(relHitCenter.y) >= 1.0 || kotlin.math.abs(relHitCenter.z) >= 1.0) {
+            logger.warn(
+                "[Placement Warning] Hit vector for pos=$targetPos is outside block boundary limit! " +
+                "relHitCenter=(${"%.2f".format(relHitCenter.x)}, ${"%.2f".format(relHitCenter.y)}, ${"%.2f".format(relHitCenter.z)}). " +
+                "Vanilla and Paper servers will silently drop this packet!"
+            )
+        }
 
         val info = InFlightPlacement(
             sequence = seq,
@@ -96,6 +112,7 @@ object ServerTelemetryTracker {
     }
 
     fun onBlockChangedAck(sequence: Int) {
+        StairPlacementDebugger.onBlockChangedAck(sequence)
         val info = inFlightBySeq.remove(sequence) ?: return
         val latency = System.currentTimeMillis() - info.sentTimestamp
         if (kyrielie.printer.client.config.ConfigManager.config.debugLogging) {
@@ -107,6 +124,7 @@ object ServerTelemetryTracker {
     }
 
     fun onBlockUpdate(pos: BlockPos, state: BlockState) {
+        StairPlacementDebugger.onBlockUpdate(pos, state)
         val info = inFlightByPos[pos] ?: return
         val latency = System.currentTimeMillis() - info.sentTimestamp
 
@@ -124,7 +142,13 @@ object ServerTelemetryTracker {
             PlacementCache.markPlaced(pos, 2000L)
         } else {
             // Server confirmed placement
-            if (kyrielie.printer.client.config.ConfigManager.config.debugLogging) {
+            val schemWorld = kyrielie.printer.client.bridge.LitematicaBridge.getSchematicWorld()
+            val expectedState = schemWorld?.getBlockState(pos)
+            if (expectedState != null && !expectedState.isAir && expectedState.block != state.block) {
+                logger.error(
+                    "[WRONG BLOCK MISPLACED] Misplaced block at $pos! Server confirmed ${state.block} but schematic expected ${expectedState.block}!"
+                )
+            } else if (kyrielie.printer.client.config.ConfigManager.config.debugLogging) {
                 logger.info(
                     "[Server CONFIRMED] Server confirmed $pos as ${state.block} in ${latency}ms (seq=${info.sequence})!"
                 )
