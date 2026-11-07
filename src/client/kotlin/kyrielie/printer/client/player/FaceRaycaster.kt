@@ -21,7 +21,7 @@ sealed class FaceRaycastResult {
 
 object FaceRaycaster {
 
-    // 8-point face sampling: standard 5 interior points + 3 upper edge samples for forward bridging
+    // 10-point face sampling: standard interior points + edge/rim samples for forward bridging
     private val UV_SAMPLES = arrayOf(
         Pair(0.5, 0.5),   // Center
         Pair(0.15, 0.5),  // Left-mid
@@ -30,7 +30,9 @@ object FaceRaycaster {
         Pair(0.5, 0.85),  // Mid-top
         Pair(0.5, 0.92),  // Upper perimeter edge (bridging)
         Pair(0.2, 0.92),  // Upper-left edge
-        Pair(0.8, 0.92)   // Upper-right edge
+        Pair(0.8, 0.92),  // Upper-right edge
+        Pair(0.5, 0.97),  // Rim edge (steep forward bridging)
+        Pair(0.2, 0.97)   // Rim edge corner
     )
 
     /**
@@ -70,7 +72,8 @@ object FaceRaycaster {
         player: Player,
         eyePos: Vec3,
         targetPos: BlockPos,
-        maxReach: Double = 4.5
+        maxReach: Double = 4.5,
+        allowDecoupledBridge: Boolean = true
     ): FaceRaycastResult {
         val failureLog = ArrayList<String>()
         var foundAnySolidNeighbor = false
@@ -109,11 +112,16 @@ object FaceRaycaster {
                     continue
                 }
 
-                // Geometric facing check: allow glancing angles (dot >= -0.15, or -0.45 when looking down at upper horizontal edge)
+                // Geometric facing check: allow glancing angles and forward-down bridging angles
                 val dot = (eyePos.x - hitVec.x) * clickedFace.stepX +
                           (eyePos.y - hitVec.y) * clickedFace.stepY +
                           (eyePos.z - hitVec.z) * clickedFace.stepZ
-                val minDot = if (clickedFace.axis.isHorizontal && eyePos.y > hitVec.y && v >= 0.85) -0.45 else -0.15
+                val isForwardBridging = clickedFace.axis.isHorizontal && eyePos.y >= hitVec.y && v >= 0.85
+                val minDot = if (isForwardBridging) {
+                    if (allowDecoupledBridge) -1.05 else -0.75
+                } else {
+                    -0.15
+                }
                 if (dot < minDot) {
                     failureLog.add("Neighbor $clickedFace @ $neighborPos: backface dot=${"%.2f".format(dot)} < min $minDot")
                     continue
@@ -137,13 +145,42 @@ object FaceRaycaster {
 
                 val clipHit = world.clip(clipCtx)
                 if (clipHit.type == HitResult.Type.BLOCK) {
-                    if (clipHit.blockPos == neighborPos && (clipHit.direction == clickedFace || (clickedFace.axis.isHorizontal && clipHit.direction == Direction.UP && v >= 0.85))) {
+                    val hitFace = clipHit.direction
+                    val isAnchor = clipHit.blockPos == neighborPos
+                    val isEdgeBridge = isAnchor && (hitFace == clickedFace || (isForwardBridging && hitFace == Direction.UP))
+                    if (isEdgeBridge) {
                         return FaceRaycastResult.Success(VisiblePlacementFace(neighborPos, clickedFace, hitVec))
                     } else {
-                        failureLog.add("Neighbor $clickedFace @ $neighborPos: occluded by ${clipHit.blockPos} (face=${clipHit.direction})")
+                        failureLog.add("Neighbor $clickedFace @ $neighborPos: occluded by ${clipHit.blockPos} (face=$hitFace)")
                     }
                 } else {
                     failureLog.add("Neighbor $clickedFace @ $neighborPos: ray missed block outline")
+                }
+            }
+
+            // Option 2 (Decoupled Geometric Contact Fallback):
+            // When in DECOUPLED_PACKET mode, if line-of-sight from camera to outer face is occluded
+            // only by the anchor block itself (looking forward over the edge), allow placement against the anchor face
+            // provided the hit point is within reach and not obstructed by other obstacles.
+            if (allowDecoupledBridge && clickedFace.axis.isHorizontal && eyePos.y >= neighborPos.y) {
+                val centerHitVec = Vec3(
+                    neighborPos.x + 0.5 + clickedFace.stepX * 0.5,
+                    neighborPos.y + 0.95,
+                    neighborPos.z + 0.5 + clickedFace.stepZ * 0.5
+                )
+                if (centerHitVec.distanceTo(eyePos) <= maxReach) {
+                    val checkRay = world.clip(
+                        ClipContext(
+                            eyePos,
+                            centerHitVec,
+                            ClipContext.Block.OUTLINE,
+                            ClipContext.Fluid.NONE,
+                            player
+                        )
+                    )
+                    if (checkRay.type == HitResult.Type.MISS || checkRay.blockPos == neighborPos) {
+                        return FaceRaycastResult.Success(VisiblePlacementFace(neighborPos, clickedFace, centerHitVec))
+                    }
                 }
             }
         }
@@ -163,9 +200,10 @@ object FaceRaycaster {
         player: Player,
         eyePos: Vec3,
         targetPos: BlockPos,
-        maxReach: Double = 4.5
+        maxReach: Double = 4.5,
+        allowDecoupledBridge: Boolean = true
     ): VisiblePlacementFace? {
-        val result = findPlacementFaceWithDiagnostics(world, player, eyePos, targetPos, maxReach)
+        val result = findPlacementFaceWithDiagnostics(world, player, eyePos, targetPos, maxReach, allowDecoupledBridge)
         return (result as? FaceRaycastResult.Success)?.face
     }
 }

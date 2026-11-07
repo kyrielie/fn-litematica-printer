@@ -102,7 +102,7 @@ object PrinterYaclConfig {
                         Option.createBuilder<Boolean>()
                             .name(Component.literal("Carpet Protocol"))
                             .description(OptionDescription.of(Component.literal("Encode directional facing into hit vectors when on Carpet-compatible servers.")))
-                            .binding(true, { config.carpetProtocol }, { config.carpetProtocol = it })
+                            .binding(false, { config.carpetProtocol }, { config.carpetProtocol = it })
                             .controller(BooleanControllerBuilder::create)
                             .build()
                     )

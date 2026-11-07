@@ -50,19 +50,19 @@ public abstract class LocalPlayerMixin extends AbstractClientPlayer {
     private void printer$onSendPositionReturn(CallbackInfo ci) {
         LocalPlayer self = (LocalPlayer) (Object) this;
         try {
-            if (this.printer$savedYaw != null) {
-                this.setYRot(this.printer$savedYaw);
-                this.setXRot(this.printer$savedPitch);
-                this.printer$savedYaw = null;
-                this.printer$savedPitch = null;
-            }
+            PrinterController.INSTANCE.onAfterSendPosition(self);
         } catch (Throwable t) {
-            PrinterController.INSTANCE.handleFatalError("LocalPlayerMixin.sendPosition(RETURN/restore)", t);
+            PrinterController.INSTANCE.handleFatalError("LocalPlayerMixin.sendPosition(RETURN/after)", t);
         } finally {
             try {
-                PrinterController.INSTANCE.onAfterSendPosition(self);
+                if (this.printer$savedYaw != null) {
+                    this.setYRot(this.printer$savedYaw);
+                    this.setXRot(this.printer$savedPitch);
+                    this.printer$savedYaw = null;
+                    this.printer$savedPitch = null;
+                }
             } catch (Throwable t) {
-                PrinterController.INSTANCE.handleFatalError("LocalPlayerMixin.sendPosition(RETURN/after)", t);
+                PrinterController.INSTANCE.handleFatalError("LocalPlayerMixin.sendPosition(RETURN/restore)", t);
             }
         }
     }

@@ -11,6 +11,8 @@ import net.minecraft.world.item.ItemStack
 
 object InventoryRestockManager {
 
+    private var lastRestockTimestamp: Long = 0L
+
     /**
      * Pure query checking if an item matching [itemPredicate] is present in player's inventory (G-3).
      * Emits zero packets and performs zero hotbar slot mutations.
@@ -72,6 +74,7 @@ object InventoryRestockManager {
             if (!stack.isEmpty && stack.count > 0 && itemPredicate(stack)) {
                 inventory.selectedSlot = slot
                 player.connection.send(ServerboundSetCarriedItemPacket(slot))
+                PrinterController.resetRollbackTracking()
                 return InteractionHand.MAIN_HAND
             }
         }
@@ -80,12 +83,24 @@ object InventoryRestockManager {
         for (slot in 9..35) {
             val stack = inventory.getItem(slot)
             if (!stack.isEmpty && stack.count > 0 && itemPredicate(stack)) {
-                val activeHotbarSlot = inventory.selectedSlot
                 val gameMode = mc.gameMode ?: return null
 
+                // Ensure no conflicting container screen is currently open
+                if (player.containerMenu !== player.inventoryMenu) {
+                    return null
+                }
+
+                val now = System.currentTimeMillis()
+                if (now - lastRestockTimestamp < 200L) {
+                    return null
+                }
+                lastRestockTimestamp = now
+
+                val activeHotbarSlot = inventory.selectedSlot
                 val containerSlot = slot
                 val hotbarTargetSlot = activeHotbarSlot
 
+                PrinterController.resetRollbackTracking()
                 gameMode.handleContainerInput(
                     player.inventoryMenu.containerId,
                     containerSlot,

@@ -168,7 +168,9 @@ object PrinterController {
             is PlacementAction.ClearObstacle -> action.aimVec.subtract(eyePos)
             is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.subtract(eyePos)
         }
-        val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
+        val (rawAimYaw, rawAimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
+        val aimYaw = if (action is PlacementAction.PlaceBlock && action.forcedYaw != null) action.forcedYaw else rawAimYaw
+        val aimPitch = if (action is PlacementAction.PlaceBlock && action.forcedPitch != null) action.forcedPitch else rawAimPitch
         pendingAction = action
         pendingOverride = LookOverride(aimYaw, aimPitch)
         return pendingOverride
@@ -202,6 +204,7 @@ object PrinterController {
                 // Secondary placement batching if budget allows and subsequent target shares similar orientation
                 var budget = ConfigManager.config.blocksPerTick - 1
                 val activeSlot = player.inventory.selectedSlot
+                val activeItem = player.inventory.getItem(activeSlot).item
                 val activeCount = player.inventory.getItem(activeSlot).count
                 if (activeCount <= 0) {
                     budget = 0
@@ -212,17 +215,22 @@ object PrinterController {
                     while (budget > 0) {
                         val secondaryAction = planNextAction(mc, player, world, eyePos) ?: break
 
-                        // F-09 Safety Gate: Do not batch directional blocks under another block's look angle.
-                        // Server-side facing is derived from the look packet; directional blocks must wait for their own tick.
-                        if (secondaryAction is PlacementAction.PlaceBlock && schematicWorld != null) {
-                            val schemState = schematicWorld.getBlockState(secondaryAction.targetPos)
-                            val isDirectional = schemState.hasProperty(BlockStateProperties.FACING) ||
-                                                schemState.hasProperty(BlockStateProperties.HORIZONTAL_FACING) ||
-                                                schemState.hasProperty(BlockStateProperties.AXIS) ||
-                                                schemState.hasProperty(BlockStateProperties.SLAB_TYPE) ||
-                                                schemState.hasProperty(BlockStateProperties.HALF)
-                            if (isDirectional) {
+                        // F-09 Safety Gate: Do not batch directional blocks or different block items under another block's look angle.
+                        // Server-side facing is derived from the look packet; directional and distinct blocks must wait for their own tick.
+                        if (secondaryAction is PlacementAction.PlaceBlock) {
+                            if (secondaryAction.requiredItem != activeItem) {
                                 break
+                            }
+                            if (schematicWorld != null) {
+                                val schemState = schematicWorld.getBlockState(secondaryAction.targetPos)
+                                val isDirectional = schemState.hasProperty(BlockStateProperties.FACING) ||
+                                                    schemState.hasProperty(BlockStateProperties.HORIZONTAL_FACING) ||
+                                                    schemState.hasProperty(BlockStateProperties.AXIS) ||
+                                                    schemState.hasProperty(BlockStateProperties.SLAB_TYPE) ||
+                                                    schemState.hasProperty(BlockStateProperties.HALF)
+                                if (isDirectional) {
+                                    break
+                                }
                             }
                         }
 
@@ -233,7 +241,9 @@ object PrinterController {
                             is PlacementAction.ClearObstacle -> secondaryAction.aimVec.subtract(eyePos)
                             is PlacementAction.ScaffoldSequence -> secondaryAction.site.anchorFace.hitVec.subtract(eyePos)
                         }
-                        val (secYaw, secPitch) = deltaToYawPitch(secDelta.x, secDelta.y, secDelta.z)
+                        val (rawSecYaw, rawSecPitch) = deltaToYawPitch(secDelta.x, secDelta.y, secDelta.z)
+                        val secYaw = if (secondaryAction is PlacementAction.PlaceBlock && secondaryAction.forcedYaw != null) secondaryAction.forcedYaw else rawSecYaw
+                        val secPitch = if (secondaryAction is PlacementAction.PlaceBlock && secondaryAction.forcedPitch != null) secondaryAction.forcedPitch else rawSecPitch
                         val yawDiff = abs(wrapDegrees(secYaw - override.yaw))
                         val pitchDiff = abs(secPitch - override.pitch)
                         if (yawDiff <= 5.0f && pitchDiff <= 5.0f) {
@@ -347,7 +357,9 @@ object PrinterController {
             is PlacementAction.ClearObstacle -> action.aimVec.subtract(eyePos)
             is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.subtract(eyePos)
         }
-        val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
+        val (rawAimYaw, rawAimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
+        val aimYaw = if (action is PlacementAction.PlaceBlock && action.forcedYaw != null) action.forcedYaw else rawAimYaw
+        val aimPitch = if (action is PlacementAction.PlaceBlock && action.forcedPitch != null) action.forcedPitch else rawAimPitch
         val yawDiff = wrapDegrees(aimYaw - player.yRot)
         val pitchDiff = aimPitch - player.xRot
         val angularDelta = sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
@@ -383,7 +395,9 @@ object PrinterController {
             is PlacementAction.ClearObstacle -> action.aimVec.subtract(eyePos)
             is PlacementAction.ScaffoldSequence -> action.site.anchorFace.hitVec.subtract(eyePos)
         }
-        val (aimYaw, aimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
+        val (rawAimYaw, rawAimPitch) = deltaToYawPitch(aimDelta.x, aimDelta.y, aimDelta.z)
+        val aimYaw = if (action is PlacementAction.PlaceBlock && action.forcedYaw != null) action.forcedYaw else rawAimYaw
+        val aimPitch = if (action is PlacementAction.PlaceBlock && action.forcedPitch != null) action.forcedPitch else rawAimPitch
         val yawDiff = abs(wrapDegrees(aimYaw - player.yRot))
         val pitchDiff = abs(aimPitch - player.xRot)
         val angularDelta = sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
@@ -495,6 +509,7 @@ object PrinterController {
             if (PlacementCache.isCached(targetPos)) continue
 
             val schemState = schematicWorld.getBlockState(targetPos)
+            val isDecoupled = ConfigManager.config.placementMode == PlacementMode.DECOUPLED_PACKET
             val action = PlacementGuideEngine.evaluate(
                 mc,
                 player,
@@ -505,7 +520,8 @@ object PrinterController {
                 useCarpetProtocol = ConfigManager.config.carpetProtocol,
                 enableScaffolding = ConfigManager.config.enableScaffolding,
                 maxReach = reach,
-                debug = shouldLog
+                debug = shouldLog,
+                allowDecoupledBridge = isDecoupled
             ) ?: continue
 
             return action
@@ -534,8 +550,47 @@ object PrinterController {
     ) {
         when (action) {
             is PlacementAction.PlaceBlock -> {
+                // Pre-flight Gate 1: Check target position is still replaceable
+                val currentTargetState = world.getBlockState(action.targetPos)
+                if (!currentTargetState.canBeReplaced()) {
+                    PlacementCache.markPlaced(action.targetPos, 500L)
+                    return
+                }
+
+                // Pre-flight Gate 2: Re-verify schematic still requires this block
+                val schematicWorld = LitematicaBridge.getSchematicWorld()
+                val schemState = schematicWorld?.getBlockState(action.targetPos)
+                if (schemState != null && schemState.block.asItem() != action.requiredItem) {
+                    return
+                }
+
+                // Pre-flight Gate 3: Check support block is still solid
+                val placeAgainstState = world.getBlockState(action.hitResult.blockPos)
+                if (placeAgainstState.isAir) {
+                    return
+                }
+
+                // Pre-flight Gate 4: Movement reach validation against current player position
+                val currentReach = action.hitResult.location.distanceTo(player.eyePosition)
+                if (currentReach > ConfigManager.config.survivalReachLimit) {
+                    return
+                }
+
+                // Pre-flight Gate 5: Player bounding box collision check
+                val targetAabb = net.minecraft.world.phys.AABB(action.targetPos)
+                if (player.boundingBox.intersects(targetAabb)) {
+                    return
+                }
+
                 // G-3: Prepare item on hotbar strictly inside executeAction
-                val preparedHand = InventoryRestockManager.prepareItem(mc, player, action.requiredItem) ?: action.hand
+                val preparedHand = InventoryRestockManager.prepareItem(mc, player, action.requiredItem) ?: return
+
+                // Pre-flight Gate 6: Strict held item identity check
+                val heldStack = player.getItemInHand(preparedHand)
+                if (heldStack.isEmpty || heldStack.item != action.requiredItem) {
+                    logger.warn("[Printer Safety] Blocked placement at ${action.targetPos}: hand $preparedHand has ${heldStack.item}, but required ${action.requiredItem}!")
+                    return
+                }
                 val ping = mc.connection?.getPlayerInfo(player.uuid)?.latency ?: 50
                 val dynamicLease = PlacementCache.computeDynamicLease(ping)
 
@@ -610,7 +665,7 @@ object PrinterController {
             }
             is PlacementAction.TransformBlock -> {
                 // Phase 8: Equip tool matching predicate (axe/hoe) and interact in-place
-                val preparedHand = InventoryRestockManager.prepareItem(mc, player, action.toolPredicate) ?: action.hand
+                val preparedHand = InventoryRestockManager.prepareItem(mc, player, action.toolPredicate) ?: return
                 ServerTelemetryTracker.setNextExpectedPlacement(action.targetPos, override.yaw, override.pitch)
                 val result = gameMode.useItemOn(player, preparedHand, action.hitResult)
                 if (result.consumesAction()) {
@@ -650,7 +705,7 @@ object PrinterController {
                     ?: net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "dirt")
                 val scaffoldOptional = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(scaffoldId)
                 val scaffoldItem = scaffoldOptional.map { it.value() }.orElse(Items.DIRT)
-                val preparedHand = InventoryRestockManager.prepareItem(mc, player, scaffoldItem) ?: action.scaffoldHand
+                val preparedHand = InventoryRestockManager.prepareItem(mc, player, scaffoldItem) ?: return
                 val scaffoldHit = BlockHitResult(
                     action.site.anchorFace.hitVec,
                     action.site.anchorFace.clickedFace,
@@ -669,5 +724,13 @@ object PrinterController {
                 }
             }
         }
+    }
+
+    /**
+     * Resets expected item count tracking to avoid false-positive rollback detection
+     * immediately after an intentional inventory swap or hotbar switch.
+     */
+    fun resetRollbackTracking() {
+        lastExpectedItemCount = -1
     }
 }
