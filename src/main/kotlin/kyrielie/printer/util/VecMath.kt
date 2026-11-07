@@ -20,6 +20,43 @@ fun deltaToYawPitch(dx: Double, dy: Double, dz: Double): Pair<Float, Float> {
 }
 
 /**
+ * Resolves a yaw angle to its corresponding cardinal facing ("north", "south", "east", "west")
+ * exactly adhering to Minecraft's Direction.fromYRot() mapping.
+ */
+fun yawToCardinalDirection(yaw: Float): String {
+    val wrapped = wrapDegrees(yaw)
+    return when {
+        wrapped >= -45f && wrapped < 45f -> "south"
+        wrapped >= 45f && wrapped < 135f -> "west"
+        wrapped >= -135f && wrapped < -45f -> "east"
+        else -> "north"
+    }
+}
+
+/**
+ * Pure feasibility evaluator: determines if aiming at (hitX, hitY, hitZ) from
+ * (eyeX, eyeY, eyeZ) naturally derives the required cardinal facing.
+ */
+fun isPlacementFeasible(
+    eyeX: Double, eyeY: Double, eyeZ: Double,
+    hitX: Double, hitY: Double, hitZ: Double,
+    requiredFacing: String,
+    isOppositeLooking: Boolean = false
+): Boolean {
+    val (yaw, _) = deltaToYawPitch(hitX - eyeX, hitY - eyeY, hitZ - eyeZ)
+    val natural = yawToCardinalDirection(yaw)
+    val opposite = when (natural) {
+        "north" -> "south"
+        "south" -> "north"
+        "east" -> "west"
+        "west" -> "east"
+        else -> natural
+    }
+    val derived = if (isOppositeLooking) opposite else natural
+    return derived.equals(requiredFacing, ignoreCase = true)
+}
+
+/**
  * Orders [items] greedily by angular proximity: starting from ([startYaw], [startPitch])
  * it repeatedly picks the remaining candidate whose aim direction is closest.
  * Keeps camera sweeps smooth and short during multi-block placements.

@@ -253,4 +253,61 @@ class PrinterCoreTest {
         // Finally layer 62
         assertEquals(62, sorted[4].y)
     }
+
+    @Test
+    fun testYawToCardinalDirection() {
+        assertEquals("south", kyrielie.printer.util.yawToCardinalDirection(0f))
+        assertEquals("south", kyrielie.printer.util.yawToCardinalDirection(30f))
+        assertEquals("south", kyrielie.printer.util.yawToCardinalDirection(-30f))
+
+        assertEquals("west", kyrielie.printer.util.yawToCardinalDirection(90f))
+        assertEquals("west", kyrielie.printer.util.yawToCardinalDirection(60f))
+        assertEquals("west", kyrielie.printer.util.yawToCardinalDirection(120f))
+
+        assertEquals("north", kyrielie.printer.util.yawToCardinalDirection(180f))
+        assertEquals("north", kyrielie.printer.util.yawToCardinalDirection(-180f))
+        assertEquals("north", kyrielie.printer.util.yawToCardinalDirection(150f))
+        assertEquals("north", kyrielie.printer.util.yawToCardinalDirection(-150f))
+
+        assertEquals("east", kyrielie.printer.util.yawToCardinalDirection(-90f))
+        assertEquals("east", kyrielie.printer.util.yawToCardinalDirection(-60f))
+        assertEquals("east", kyrielie.printer.util.yawToCardinalDirection(-120f))
+    }
+
+    @Test
+    fun testVanillaFeasibilitySolverStairsAndObservers() {
+        // Player standing at (0, 60, 5) aiming North towards block at (0, 60, 0)
+        // Natural aim vector is looking North (yaw = -180°)
+        val eyeX = 0.5
+        val eyeY = 61.62
+        val eyeZ = 5.5
+
+        val hitX = 0.5
+        val hitY = 60.5
+        val hitZ = 0.5
+
+        // A stair requiring North facing from this vantage point is FEASIBLE
+        assertTrue(
+            kyrielie.printer.util.isPlacementFeasible(eyeX, eyeY, eyeZ, hitX, hitY, hitZ, "north", isOppositeLooking = false),
+            "Standing South looking North towards block must allow North-facing stairs"
+        )
+
+        // A stair requiring South facing from this vantage point is INFEASIBLE (would require player to face away from block)
+        assertFalse(
+            kyrielie.printer.util.isPlacementFeasible(eyeX, eyeY, eyeZ, hitX, hitY, hitZ, "south", isOppositeLooking = false),
+            "Standing South looking North towards block must NOT allow South-facing stairs"
+        )
+
+        // An observer requiring South facing from this vantage point is FEASIBLE (observers face opposite look)
+        assertTrue(
+            kyrielie.printer.util.isPlacementFeasible(eyeX, eyeY, eyeZ, hitX, hitY, hitZ, "south", isOppositeLooking = true),
+            "Standing South looking North towards block must allow South-facing observers"
+        )
+
+        // An observer requiring North facing from this vantage point is INFEASIBLE
+        assertFalse(
+            kyrielie.printer.util.isPlacementFeasible(eyeX, eyeY, eyeZ, hitX, hitY, hitZ, "north", isOppositeLooking = true),
+            "Standing South looking North towards block must NOT allow North-facing observers"
+        )
+    }
 }

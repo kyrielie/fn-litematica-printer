@@ -6,8 +6,10 @@ import dev.isxander.yacl3.api.OptionDescription
 import dev.isxander.yacl3.api.YetAnotherConfigLib
 import dev.isxander.yacl3.api.controller.BooleanControllerBuilder
 import dev.isxander.yacl3.api.controller.DoubleSliderControllerBuilder
+import dev.isxander.yacl3.api.controller.DropdownStringControllerBuilder
 import dev.isxander.yacl3.api.controller.EnumDropdownControllerBuilder
 import dev.isxander.yacl3.api.controller.IntegerSliderControllerBuilder
+import dev.isxander.yacl3.api.controller.StringControllerBuilder
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.network.chat.Component
 
@@ -100,6 +102,18 @@ object PrinterYaclConfig {
                     )
                     .option(
                         Option.createBuilder<Boolean>()
+                            .name(Component.literal("Strict Layer Sync"))
+                            .description(
+                                OptionDescription.of(
+                                    Component.literal("When enabled, fully completes the lowest Y-layer before placing any block on higher layers.")
+                                )
+                            )
+                            .binding(false, { config.strictLayerSync }, { config.strictLayerSync = it })
+                            .controller(BooleanControllerBuilder::create)
+                            .build()
+                    )
+                    .option(
+                        Option.createBuilder<Boolean>()
                             .name(Component.literal("Carpet Protocol"))
                             .description(OptionDescription.of(Component.literal("Encode directional facing into hit vectors when on Carpet-compatible servers.")))
                             .binding(false, { config.carpetProtocol }, { config.carpetProtocol = it })
@@ -108,9 +122,67 @@ object PrinterYaclConfig {
                     )
                     .option(
                         Option.createBuilder<Boolean>()
+                            .name(Component.literal("Item Saver Protection"))
+                            .description(OptionDescription.of(Component.literal("Prevents tools from breaking by automatically stopping use when durability is low.")))
+                            .binding(true, { config.itemSaver }, { config.itemSaver = it })
+                            .controller(BooleanControllerBuilder::create)
+                            .build()
+                    )
+                    .option(
+                        Option.createBuilder<Int>()
+                            .name(Component.literal("Item Saver Threshold"))
+                            .description(OptionDescription.of(Component.literal("Minimum remaining durability before a tool is protected from breaking.")))
+                            .binding(10, { config.itemSaverThreshold }, { config.itemSaverThreshold = it })
+                            .controller { opt ->
+                                IntegerSliderControllerBuilder.create(opt)
+                                    .range(1, 50)
+                                    .step(1)
+                                    .formatValue { Component.literal("$it durability") }
+                            }
+                            .build()
+                    )
+                    .option(
+                        Option.createBuilder<Boolean>()
                             .name(Component.literal("Enable Scaffolding"))
                             .description(OptionDescription.of(Component.literal("Automatically place temporary blocks to build floating structures.")))
                             .binding(true, { config.enableScaffolding }, { config.enableScaffolding = it })
+                            .controller(BooleanControllerBuilder::create)
+                            .build()
+                    )
+                    .option(
+                        Option.createBuilder<ScaffoldPreferredFace>()
+                            .name(Component.literal("Scaffold Preferred Face"))
+                            .description(OptionDescription.of(Component.literal("Preferred direction to attach temporary scaffolding.")))
+                            .binding(ScaffoldPreferredFace.UNDERSIDE, { config.scaffoldPreferredFace }, { config.scaffoldPreferredFace = it })
+                            .controller { opt ->
+                                EnumDropdownControllerBuilder.create(opt).formatValue { face ->
+                                    when (face) {
+                                        ScaffoldPreferredFace.UNDERSIDE -> Component.literal("Underside (Floor/Ceiling)")
+                                        ScaffoldPreferredFace.INTERIOR_AUTO -> Component.literal("Interior (Cavity Auto)")
+                                        ScaffoldPreferredFace.TOP -> Component.literal("Top (Above Overhang)")
+                                        ScaffoldPreferredFace.ANY -> Component.literal("Any Neighbor")
+                                    }
+                                }
+                            }
+                            .build()
+                    )
+                    .option(
+                        Option.createBuilder<String>()
+                            .name(Component.literal("Scaffold Block Item"))
+                            .description(OptionDescription.of(Component.literal("Item identifier used for temporary scaffolding.")))
+                            .binding("minecraft:dirt", { config.scaffoldBlockItem }, { config.scaffoldBlockItem = it })
+                            .controller { opt ->
+                                DropdownStringControllerBuilder.create(opt)
+                                    .values("minecraft:dirt", "minecraft:cobblestone", "minecraft:netherrack", "minecraft:scaffolding")
+                                    .allowAnyValue(true)
+                            }
+                            .build()
+                    )
+                    .option(
+                        Option.createBuilder<Boolean>()
+                            .name(Component.literal("Remove Scaffolding"))
+                            .description(OptionDescription.of(Component.literal("Automatically break temporary scaffolding blocks once the schematic target block is confirmed placed.")))
+                            .binding(false, { config.removeScaffolding }, { config.removeScaffolding = it })
                             .controller(BooleanControllerBuilder::create)
                             .build()
                     )

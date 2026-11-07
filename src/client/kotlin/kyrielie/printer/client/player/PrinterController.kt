@@ -215,35 +215,32 @@ object PrinterController {
                     while (budget > 0) {
                         val secondaryAction = planNextAction(mc, player, world, eyePos) ?: break
 
+                        // Strictly restrict secondary same-tick batching to PlaceBlock only (never batch obstacle breaks or tool interactions)
+                        if (secondaryAction !is PlacementAction.PlaceBlock) {
+                            break
+                        }
+
                         // F-09 Safety Gate: Do not batch directional blocks or different block items under another block's look angle.
                         // Server-side facing is derived from the look packet; directional and distinct blocks must wait for their own tick.
-                        if (secondaryAction is PlacementAction.PlaceBlock) {
-                            if (secondaryAction.requiredItem != activeItem) {
+                        if (secondaryAction.requiredItem != activeItem) {
+                            break
+                        }
+                        if (schematicWorld != null) {
+                            val schemState = schematicWorld.getBlockState(secondaryAction.targetPos)
+                            val isDirectional = schemState.hasProperty(BlockStateProperties.FACING) ||
+                                                schemState.hasProperty(BlockStateProperties.HORIZONTAL_FACING) ||
+                                                schemState.hasProperty(BlockStateProperties.AXIS) ||
+                                                schemState.hasProperty(BlockStateProperties.SLAB_TYPE) ||
+                                                schemState.hasProperty(BlockStateProperties.HALF)
+                            if (isDirectional) {
                                 break
-                            }
-                            if (schematicWorld != null) {
-                                val schemState = schematicWorld.getBlockState(secondaryAction.targetPos)
-                                val isDirectional = schemState.hasProperty(BlockStateProperties.FACING) ||
-                                                    schemState.hasProperty(BlockStateProperties.HORIZONTAL_FACING) ||
-                                                    schemState.hasProperty(BlockStateProperties.AXIS) ||
-                                                    schemState.hasProperty(BlockStateProperties.SLAB_TYPE) ||
-                                                    schemState.hasProperty(BlockStateProperties.HALF)
-                                if (isDirectional) {
-                                    break
-                                }
                             }
                         }
 
-                        val secDelta = when (secondaryAction) {
-                            is PlacementAction.PlaceBlock -> secondaryAction.aimVec.subtract(eyePos)
-                            is PlacementAction.MultiClick -> secondaryAction.aimVec.subtract(eyePos)
-                            is PlacementAction.TransformBlock -> secondaryAction.aimVec.subtract(eyePos)
-                            is PlacementAction.ClearObstacle -> secondaryAction.aimVec.subtract(eyePos)
-                            is PlacementAction.ScaffoldSequence -> secondaryAction.site.anchorFace.hitVec.subtract(eyePos)
-                        }
+                        val secDelta = secondaryAction.aimVec.subtract(eyePos)
                         val (rawSecYaw, rawSecPitch) = deltaToYawPitch(secDelta.x, secDelta.y, secDelta.z)
-                        val secYaw = if (secondaryAction is PlacementAction.PlaceBlock && secondaryAction.forcedYaw != null) secondaryAction.forcedYaw else rawSecYaw
-                        val secPitch = if (secondaryAction is PlacementAction.PlaceBlock && secondaryAction.forcedPitch != null) secondaryAction.forcedPitch else rawSecPitch
+                        val secYaw = if (secondaryAction.forcedYaw != null) secondaryAction.forcedYaw else rawSecYaw
+                        val secPitch = if (secondaryAction.forcedPitch != null) secondaryAction.forcedPitch else rawSecPitch
                         val yawDiff = abs(wrapDegrees(secYaw - override.yaw))
                         val pitchDiff = abs(secPitch - override.pitch)
                         if (yawDiff <= 5.0f && pitchDiff <= 5.0f) {
@@ -442,7 +439,13 @@ object PrinterController {
         val schematicWorld = LitematicaBridge.getSchematicWorld() ?: return null
         val reach = ConfigManager.config.survivalReachLimit
         val reachCeil = ceil(reach).toInt()
+        val reachSq = reach * reach
         val pPos = player.blockPosition()
+        val eyeX = eyePos.x
+        val eyeY = eyePos.y
+        val eyeZ = eyePos.z
+        val playerBox = player.boundingBox.deflate(1e-4)
+        val mutPos = BlockPos.MutableBlockPos()
 
         val rawCandidates = ArrayList<PlacementTarget>()
         val now = System.currentTimeMillis()
@@ -452,25 +455,37 @@ object PrinterController {
         for (dx in -reachCeil..reachCeil) {
             for (dy in -reachCeil..reachCeil) {
                 for (dz in -reachCeil..reachCeil) {
-                    val pos = BlockPos(pPos.x + dx, pPos.y + dy, pPos.z + dz)
+                    val targetX = pPos.x + dx
+                    val targetY = pPos.y + dy
+                    val targetZ = pPos.z + dz
 
-                    // F-01 Fix: Player AABB intersection check allows blocks under feet while strictly rejecting head & body
-                    val blockAabb = net.minecraft.world.phys.AABB(pos)
-                    if (player.boundingBox.intersects(blockAabb)) continue
+                    // 1. Distance pre-filter: center of block to eyePos (Zero-alloc before checking box or registry)
+                    val cX = targetX + 0.5 - eyeX
+                    val cY = targetY + 0.5 - eyeY
+                    val cZ = targetZ + 0.5 - eyeZ
+                    if (cX * cX + cY * cY + cZ * cZ > reachSq) continue
 
-                    if (pos.distToCenterSqr(eyePos.x, eyePos.y, eyePos.z) > (reach * reach)) continue
-                    if (!LitematicaBridge.isPositionWithinRenderLayers(pos)) continue
+                    // 2. Zero-allocation Player AABB intersection check (G-11):
+                    // Allows blocks under feet while strictly rejecting head & body without allocating AABB objects
+                    if (playerBox.minX < targetX + 1.0 && playerBox.maxX > targetX &&
+                        playerBox.minY < targetY + 1.0 && playerBox.maxY > targetY &&
+                        playerBox.minZ < targetZ + 1.0 && playerBox.maxZ > targetZ) {
+                        continue
+                    }
 
-                    val schemState = schematicWorld.getBlockState(pos)
-                    val worldState = world.getBlockState(pos)
+                    mutPos.set(targetX, targetY, targetZ)
+                    if (!LitematicaBridge.isPositionWithinRenderLayers(mutPos)) continue
+
+                    val schemState = schematicWorld.getBlockState(mutPos)
+                    val worldState = world.getBlockState(mutPos)
                     if (schemState.isAir || schemState == worldState) continue
-                    if (PlacementCache.isCached(pos)) continue
+                    if (PlacementCache.isCached(mutPos)) continue
 
                     // F-07 Fix: Extract clean registered block key instead of Block.toString()
                     val blockId = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(schemState.block).toString()
                     rawCandidates.add(
                         PlacementTarget(
-                            pos.x, pos.y, pos.z,
+                            targetX, targetY, targetZ,
                             blockId
                         )
                     )
@@ -677,6 +692,7 @@ object PrinterController {
             }
             is PlacementAction.ClearObstacle -> {
                 // Phase 9: Switch to best tool on hotbar and dispatch instant break for soft debris
+                ServerTelemetryTracker.setNextExpectedPlacement(action.targetPos, override.yaw, override.pitch)
                 if (player.inventory.selectedSlot != action.bestSlot) {
                     player.inventory.selectedSlot = action.bestSlot
                     player.connection.send(net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket(action.bestSlot))
