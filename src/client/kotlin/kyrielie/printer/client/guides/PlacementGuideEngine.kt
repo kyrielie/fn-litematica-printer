@@ -21,6 +21,23 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties
 import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.Vec3
 
+sealed class PlacementRejection {
+    data class MissingItem(val item: net.minecraft.world.item.Item, val details: String? = null) : PlacementRejection()
+    data object MultiBlockSlave : PlacementRejection()
+    data class BlockOccupied(val existingBlock: net.minecraft.world.level.block.Block) : PlacementRejection()
+    data class SafetyGateBlocked(val reason: String) : PlacementRejection()
+    data class InfeasibleOrientation(val details: String) : PlacementRejection()
+    data class RaycastFailed(val details: String, val faceAttempts: List<String> = emptyList()) : PlacementRejection()
+    data class NoSolidSupport(val details: String) : PlacementRejection()
+    data object AwaitingWaterlogging : PlacementRejection()
+    data object AlreadyPlaced : PlacementRejection()
+}
+
+sealed class EvaluationResult {
+    data class Success(val action: PlacementAction) : EvaluationResult()
+    data class Rejected(val rejection: PlacementRejection) : EvaluationResult()
+}
+
 sealed class PlacementAction {
     data class PlaceBlock(
         val hitResult: BlockHitResult,
@@ -56,7 +73,7 @@ sealed class PlacementAction {
 
     data class ScaffoldSequence(
         val site: ScaffoldSite,
-        val scaffoldHand: InteractionHand,
+        val scaffoldItem: net.minecraft.world.item.Item,
         val targetHand: InteractionHand,
         val targetPos: BlockPos
     ) : PlacementAction()
@@ -117,8 +134,32 @@ object PlacementGuideEngine {
         debug: Boolean = false,
         allowDecoupledBridge: Boolean = true
     ): PlacementAction? {
+        val res = evaluateDetailed(
+            mc, player, world, eyePos, pos, schematicState,
+            useCarpetProtocol, enableScaffolding, maxReach, debug, allowDecoupledBridge
+        )
+        return (res as? EvaluationResult.Success)?.action
+    }
+
+    /**
+     * Diagnostic evaluation: Inspects discrepancies and returns detailed [EvaluationResult]
+     * capturing the precise reason why candidate blocks are rejected or deferred.
+     */
+    fun evaluateDetailed(
+        mc: Minecraft,
+        player: LocalPlayer,
+        world: Level,
+        eyePos: Vec3,
+        pos: BlockPos,
+        schematicState: BlockState,
+        useCarpetProtocol: Boolean = false,
+        enableScaffolding: Boolean = false,
+        maxReach: Double = 4.5,
+        debug: Boolean = false,
+        allowDecoupledBridge: Boolean = true
+    ): EvaluationResult {
         // G-7: Skip secondary multi-block components
-        if (isMultiBlockSlavePart(schematicState)) return null
+        if (isMultiBlockSlavePart(schematicState)) return EvaluationResult.Rejected(PlacementRejection.MultiBlockSlave)
 
         val effectiveCarpet = if (useCarpetProtocol) {
             val supported = kyrielie.printer.client.bridge.CarpetProtocolDetector.isCarpetSupported()
@@ -130,8 +171,27 @@ object PlacementGuideEngine {
 
         val currentState = world.getBlockState(pos)
 
-        // 1. Check if the block is already placed but needs state progression
+        // 1. Check if the block is already placed but needs state progression or waterlogging
         if (currentState.block == schematicState.block) {
+            val transform = kyrielie.printer.client.interaction.BlockTransformationRegistry.getRequiredTransformation(currentState, schematicState)
+            if (transform is kyrielie.printer.client.interaction.TransformationAction.ItemInteraction &&
+                transform.requiredItem == net.minecraft.world.item.Items.WATER_BUCKET
+            ) {
+                if (InventoryRestockManager.hasItem(player, net.minecraft.world.item.Items.WATER_BUCKET)) {
+                    val centerVec = Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)
+                    val hitResult = BlockHitResult(centerVec, Direction.UP, pos, false)
+                    return EvaluationResult.Success(PlacementAction.TransformBlock(
+                        hitResult,
+                        InteractionHand.MAIN_HAND,
+                        pos,
+                        centerVec,
+                        { !it.isEmpty && it.item == net.minecraft.world.item.Items.WATER_BUCKET }
+                    ))
+                } else {
+                    return EvaluationResult.Rejected(PlacementRejection.MissingItem(net.minecraft.world.item.Items.WATER_BUCKET, "Water bucket needed for waterlogging"))
+                }
+            }
+
             val clicksNeeded = calculateClicksNeeded(currentState, schematicState)
             if (clicksNeeded > 0) {
                 val centerVec = Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)
@@ -141,38 +201,80 @@ object PlacementGuideEngine {
                     pos,
                     false
                 )
-                return PlacementAction.MultiClick(hitResult, InteractionHand.MAIN_HAND, pos, clicksNeeded, centerVec)
+                return EvaluationResult.Success(PlacementAction.MultiClick(hitResult, InteractionHand.MAIN_HAND, pos, clicksNeeded, centerVec))
             }
-            return null
+            return EvaluationResult.Rejected(PlacementRejection.AlreadyPlaced)
         }
 
         // 2. Check for in-place block transformations (Phase 8: log stripping, tilling, waxing)
         if (!currentState.isAir && currentState.block != schematicState.block) {
             val transform = kyrielie.printer.client.interaction.BlockTransformationRegistry.getRequiredTransformation(currentState, schematicState)
             if (transform != null) {
-                val centerVec = Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)
-                val hitResult = BlockHitResult(centerVec, Direction.UP, pos, false)
+                // Find visible/best exterior face of current block to interact with
+                // Must have line of sight from eyePos without occlusion by intervening solid blocks
+                val visibleFace = Direction.entries
+                    .filter { dir ->
+                        val adjacent = world.getBlockState(pos.relative(dir))
+                        adjacent.isAir || adjacent.canBeReplaced() || !adjacent.isSolid
+                    }
+                    .mapNotNull { dir ->
+                        val testVec = Vec3(
+                            pos.x + 0.5 + dir.stepX * 0.49,
+                            pos.y + 0.5 + dir.stepY * 0.49,
+                            pos.z + 0.5 + dir.stepZ * 0.49
+                        )
+                        if (testVec.distanceTo(eyePos) > maxReach) return@mapNotNull null
+                        val clip = world.clip(
+                            net.minecraft.world.level.ClipContext(
+                                eyePos,
+                                testVec,
+                                net.minecraft.world.level.ClipContext.Block.OUTLINE,
+                                net.minecraft.world.level.ClipContext.Fluid.NONE,
+                                player
+                            )
+                        )
+                        val isClear = clip.type == net.minecraft.world.phys.HitResult.Type.MISS || clip.blockPos == pos
+                        if (isClear) Pair(dir, testVec) else null
+                    }
+                    .maxByOrNull { (dir, testVec) ->
+                        val faceVec = Vec3(dir.stepX.toDouble(), dir.stepY.toDouble(), dir.stepZ.toDouble())
+                        val toEye = eyePos.subtract(testVec).normalize()
+                        faceVec.dot(toEye)
+                    }
+
+                if (visibleFace == null) {
+                    if (debug) PrinterController.logger.info("[Printer Debug] Transform at $pos rejected: all exterior faces occluded from player view")
+                    return EvaluationResult.Rejected(PlacementRejection.RaycastFailed("All faces of $pos occluded from player view"))
+                }
+
+                val faceToClick = visibleFace.first
+                val aimVec = visibleFace.second
+                val hitResult = BlockHitResult(aimVec, faceToClick, pos, false)
                 when (transform) {
                     is kyrielie.printer.client.interaction.TransformationAction.ToolInteraction -> {
                         if (InventoryRestockManager.hasItem(player, transform.toolPredicate)) {
-                            return PlacementAction.TransformBlock(
+                            return EvaluationResult.Success(PlacementAction.TransformBlock(
                                 hitResult,
                                 InteractionHand.MAIN_HAND,
                                 pos,
-                                centerVec,
+                                aimVec,
                                 transform.toolPredicate
-                            )
+                            ))
+                        } else {
+                            return EvaluationResult.Rejected(PlacementRejection.MissingItem(transform.representativeItem))
                         }
                     }
                     is kyrielie.printer.client.interaction.TransformationAction.ItemInteraction -> {
                         if (InventoryRestockManager.hasItem(player, transform.requiredItem)) {
-                            return PlacementAction.PlaceBlock(
+                            return EvaluationResult.Success(PlacementAction.TransformBlock(
                                 hitResult,
                                 InteractionHand.MAIN_HAND,
                                 pos,
-                                centerVec,
-                                transform.requiredItem
-                            )
+                                aimVec,
+                                { !it.isEmpty && it.item == transform.requiredItem }
+                            ))
+                        } else {
+                            return EvaluationResult.Rejected(PlacementRejection.MissingItem(transform.requiredItem))
                         }
                     }
                 }
@@ -187,14 +289,14 @@ object PlacementGuideEngine {
                 )
                 val bestSlot = toolSet.getBestSlot(currentState)
                 val centerVec = Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)
-                return PlacementAction.ClearObstacle(pos, centerVec, bestSlot)
+                return EvaluationResult.Success(PlacementAction.ClearObstacle(pos, centerVec, bestSlot))
             }
         }
 
         // Must be replaceable or air in the real world
         if (!currentState.isAir && !currentState.canBeReplaced()) {
             if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: world block ${currentState.block} is not air/replaceable")
-            return null
+            return EvaluationResult.Rejected(PlacementRejection.BlockOccupied(currentState.block))
         }
 
         // Redstone & Gravity Contextual Safety Gates (Phase 10)
@@ -202,20 +304,54 @@ object PlacementGuideEngine {
         if (schemWorld != null) {
             if (!kyrielie.printer.client.safety.RedstoneSafetyEngine.isSafeToPlace(world, schemWorld, pos, schematicState)) {
                 if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: redstone/gravity safety gate blocked placement")
-                return null
+                return EvaluationResult.Rejected(PlacementRejection.SafetyGateBlocked("Redstone/gravity safety gate"))
             }
         }
 
         // 3. Resolve required item to place this block (G-3 pure non-mutating check)
-        val item = schematicState.block.asItem()
+        val strippedBlock = schematicState.block
+        val rawVariant = kyrielie.printer.client.interaction.BlockTransformationRegistry.getUnstrippedVariant(strippedBlock)
+        val directItem = strippedBlock.asItem()
+        val item = if (rawVariant != null && !InventoryRestockManager.hasItem(player, directItem)) {
+            val rawItem = rawVariant.asItem()
+            val hasRaw = InventoryRestockManager.hasItem(player, rawItem)
+            // Continue to place raw logs even if no axe is currently available to strip
+            if (hasRaw) rawItem else directItem
+        } else {
+            directItem
+        }
         if (!InventoryRestockManager.hasItem(player, item)) {
             if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: item $item not found in inventory!")
-            return null
+            return EvaluationResult.Rejected(PlacementRejection.MissingItem(item))
         }
         val hand = InventoryRestockManager.getPreferredHand(player, item)
 
+        // 3b. Specialized water surface placement (Lily Pads & Frogspawn)
+        if (item is net.minecraft.world.item.PlaceOnWaterBlockItem) {
+            val belowPos = pos.below()
+            val belowFluid = world.getFluidState(belowPos)
+            if (belowFluid.isSource) {
+                val waterHitVec = Vec3(pos.x + 0.5, pos.y.toDouble(), pos.z + 0.5)
+                val hitResult = BlockHitResult(waterHitVec, Direction.UP, belowPos, false)
+                return EvaluationResult.Success(PlacementAction.PlaceBlock(hitResult, hand, pos, waterHitVec, item))
+            }
+            return EvaluationResult.Rejected(PlacementRejection.NoSolidSupport("Water surface required for lily pad / frogspawn"))
+        }
+
         // 4. Try standard solid-neighbor face placement
-        val raycastResult = FaceRaycaster.findPlacementFaceWithDiagnostics(world, player, eyePos, pos, maxReach, allowDecoupledBridge)
+        val reqAxis = if (!effectiveCarpet && schematicState.hasProperty(BlockStateProperties.AXIS)) {
+            schematicState.getValue(BlockStateProperties.AXIS)
+        } else null
+
+        val raycastResult = FaceRaycaster.findPlacementFaceWithDiagnostics(
+            world,
+            player,
+            eyePos,
+            pos,
+            maxReach,
+            allowDecoupledBridge,
+            requiredAxis = reqAxis
+        )
         if (raycastResult is FaceRaycastResult.Success) {
             val placementFace = raycastResult.face
             var hitVec = placementFace.hitVec
@@ -226,7 +362,7 @@ object PlacementGuideEngine {
                 val reqAxis = schematicState.getValue(BlockStateProperties.AXIS)
                 if (placementFace.clickedFace.axis != reqAxis) {
                     if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: clicked face ${placementFace.clickedFace} axis does not match required pillar axis $reqAxis")
-                    return null
+                    return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Clicked face ${placementFace.clickedFace} axis does not match required pillar axis $reqAxis"))
                 }
             }
 
@@ -234,17 +370,17 @@ object PlacementGuideEngine {
             if (!effectiveCarpet && schematicState.hasProperty(BlockStateProperties.SLAB_TYPE)) {
                 val slabType = schematicState.getValue(BlockStateProperties.SLAB_TYPE)
                 if (slabType == net.minecraft.world.level.block.state.properties.SlabType.BOTTOM) {
-                    if (placementFace.clickedFace == Direction.DOWN) return null
+                    if (placementFace.clickedFace == Direction.DOWN) return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Cannot place bottom slab against bottom face"))
                 } else if (slabType == net.minecraft.world.level.block.state.properties.SlabType.TOP) {
-                    if (placementFace.clickedFace == Direction.UP) return null
+                    if (placementFace.clickedFace == Direction.UP) return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Cannot place top slab against top face"))
                 }
             }
             if (!effectiveCarpet && schematicState.hasProperty(BlockStateProperties.HALF)) {
                 val half = schematicState.getValue(BlockStateProperties.HALF)
                 if (half == net.minecraft.world.level.block.state.properties.Half.BOTTOM) {
-                    if (placementFace.clickedFace == Direction.DOWN) return null
+                    if (placementFace.clickedFace == Direction.DOWN) return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Cannot place bottom-half block against bottom face"))
                 } else if (half == net.minecraft.world.level.block.state.properties.Half.TOP) {
-                    if (placementFace.clickedFace == Direction.UP) return null
+                    if (placementFace.clickedFace == Direction.UP) return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Cannot place top-half block against top face"))
                 }
             }
 
@@ -303,13 +439,13 @@ object PlacementGuideEngine {
                     if (placementFace.clickedFace.axis.isHorizontal) {
                         if (placementFace.clickedFace != reqFacing) {
                             if (debug) PrinterController.logger.info("[Printer Debug] $pos trapdoor rejected: clicked face ${placementFace.clickedFace} != required facing $reqFacing")
-                            return null
+                            return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Trapdoor clicked face ${placementFace.clickedFace} != required facing $reqFacing"))
                         }
                     } else {
                         // When clicking UP or DOWN, vanilla sets FACING = player.getDirection().opposite
                         if (naturalFacing.opposite != reqFacing) {
                             if (debug) PrinterController.logger.info("[Printer Debug] $pos trapdoor rejected: natural facing ${naturalFacing.opposite} != required facing $reqFacing")
-                            return null
+                            return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Trapdoor natural facing ${naturalFacing.opposite} != required facing $reqFacing"))
                         }
                     }
                 } else if (schematicState.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
@@ -317,7 +453,7 @@ object PlacementGuideEngine {
                     val expectedFacing = if (isObserver || isPiston) naturalFacing.opposite else naturalFacing
                     if (expectedFacing != reqFacing) {
                         if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: natural facing $expectedFacing != required facing $reqFacing (quadrant infeasible)")
-                        return null
+                        return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Facing $expectedFacing != required facing $reqFacing"))
                     }
                 } else if (schematicState.hasProperty(BlockStateProperties.FACING)) {
                     val reqFacing = schematicState.getValue(BlockStateProperties.FACING)
@@ -325,21 +461,21 @@ object PlacementGuideEngine {
                         val expectedFacing = if (isObserver || isPiston) naturalFacing.opposite else naturalFacing
                         if (expectedFacing != reqFacing || naturalPitch < -45f || naturalPitch > 45f) {
                             if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: natural facing $expectedFacing != required horizontal facing $reqFacing (quadrant infeasible)")
-                            return null
+                            return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Horizontal facing $expectedFacing != required $reqFacing"))
                         }
                     } else if (reqFacing == Direction.UP) {
                         // Observers and pistons face opposite of look: looking DOWN (pitch > 45°) places facing UP
                         val targetPitchValid = if (isObserver || isPiston) naturalPitch > 45f else naturalPitch < -45f
                         if (!targetPitchValid) {
                             if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: pitch ${"%.1f".format(naturalPitch)}° cannot place vertical facing UP")
-                            return null
+                            return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Pitch ${"%.1f".format(naturalPitch)}° cannot place vertical facing UP"))
                         }
                     } else if (reqFacing == Direction.DOWN) {
                         // Observers and pistons face opposite of look: looking UP (pitch < -45°) places facing DOWN
                         val targetPitchValid = if (isObserver || isPiston) naturalPitch < -45f else naturalPitch > 45f
                         if (!targetPitchValid) {
                             if (debug) PrinterController.logger.info("[Printer Debug] $pos rejected: pitch ${"%.1f".format(naturalPitch)}° cannot place vertical facing DOWN")
-                            return null
+                            return EvaluationResult.Rejected(PlacementRejection.InfeasibleOrientation("Pitch ${"%.1f".format(naturalPitch)}° cannot place vertical facing DOWN"))
                         }
                     }
                 }
@@ -351,7 +487,7 @@ object PlacementGuideEngine {
                 placementFace.placeAgainstPos,
                 false
             )
-            return PlacementAction.PlaceBlock(hitResult, hand, pos, realHitVec, item, forcedYaw, forcedPitch)
+            return EvaluationResult.Success(PlacementAction.PlaceBlock(hitResult, hand, pos, realHitVec, item, forcedYaw, forcedPitch))
         } else if (raycastResult is FaceRaycastResult.Failure) {
             if (debug) {
                 val reasons = raycastResult.reasons.take(3).joinToString("; ")
@@ -360,18 +496,36 @@ object PlacementGuideEngine {
         }
 
         // 5. If no solid contact face exists, check for autonomous scaffolding
+        val isNoSolidNeighbor = raycastResult is FaceRaycastResult.Failure &&
+            raycastResult.reasons.any { it.contains("No solid neighbor blocks exist") }
+
         if (enableScaffolding) {
-            val site = ScaffoldHelper.findScaffoldSite(world, player, eyePos, pos, maxReach)
-            if (site != null) {
-                val scaffoldItem = net.minecraft.world.item.Items.DIRT
-                if (InventoryRestockManager.hasItem(player, scaffoldItem)) {
-                    val scaffoldHand = InventoryRestockManager.getPreferredHand(player, scaffoldItem)
-                    return PlacementAction.ScaffoldSequence(site, scaffoldHand, hand, pos)
+            val scaffoldItem = ScaffoldHelper.resolveScaffoldItem(player)
+            if (scaffoldItem != null) {
+                val site = ScaffoldHelper.findScaffoldSite(
+                    world,
+                    player,
+                    eyePos,
+                    pos,
+                    schematicState,
+                    maxReach,
+                    allowDecoupledBridge = allowDecoupledBridge
+                )
+                if (site != null) {
+                    return EvaluationResult.Success(PlacementAction.ScaffoldSequence(site, scaffoldItem, hand, pos))
+                } else {
+                    return EvaluationResult.Rejected(PlacementRejection.NoSolidSupport("No valid scaffold site found (air-only constraint / pillar axis)"))
                 }
+            } else {
+                return EvaluationResult.Rejected(PlacementRejection.NoSolidSupport("No valid scaffolding items (dirt/scaffolding) in inventory matching whitelist"))
             }
+        } else if (isNoSolidNeighbor) {
+            return EvaluationResult.Rejected(PlacementRejection.NoSolidSupport("No solid neighbor blocks exist adjacent to target (scaffolding disabled)"))
         }
 
-        return null
+        val failureReasons = (raycastResult as? FaceRaycastResult.Failure)?.reasons ?: emptyList()
+        val failDetail = failureReasons.firstOrNull() ?: "Raycast occluded or out of reach"
+        return EvaluationResult.Rejected(PlacementRejection.RaycastFailed(failDetail, failureReasons))
     }
 
     private fun calculateClicksNeeded(current: BlockState, target: BlockState): Int {

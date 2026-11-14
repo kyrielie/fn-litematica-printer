@@ -51,6 +51,32 @@ object PrinterYaclConfig {
                             .build()
                     )
                     .option(
+                        Option.createBuilder<SpeedPreset>()
+                            .name(Component.literal("Speed & Anticheat Preset"))
+                            .description(
+                                OptionDescription.of(
+                                    Component.literal(
+                                        "Strict Stealth: 1 block/tick, aim assist, 3-tick swap delay (GrimAC/Vulcan safe).\n" +
+                                        "Fast SMP (Recommended): 2 blocks/tick, decoupled movement aiming, 2-tick swap delay.\n" +
+                                        "Max Speed: Up to 6 blocks/tick, instant swaps (Creative/Technical servers).\n" +
+                                        "Custom: Manual tuning of sliders below."
+                                    )
+                                )
+                            )
+                            .binding(SpeedPreset.FAST_SMP, { config.speedPreset }, { config.applyPreset(it) })
+                            .controller { opt ->
+                                EnumDropdownControllerBuilder.create(opt).formatValue { preset ->
+                                    when (preset) {
+                                        SpeedPreset.STRICT_STEALTH -> Component.literal("Strict Stealth (GrimAC/Vulcan Safe)")
+                                        SpeedPreset.FAST_SMP -> Component.literal("Fast SMP (Recommended)")
+                                        SpeedPreset.MAX_SPEED -> Component.literal("Max Speed (Technical / Creative)")
+                                        SpeedPreset.CUSTOM -> Component.literal("Custom Configuration")
+                                    }
+                                }
+                            }
+                            .build()
+                    )
+                    .option(
                         Option.createBuilder<PlacementMode>()
                             .name(Component.literal("Placement Look Mode"))
                             .description(
@@ -97,6 +123,23 @@ object PrinterYaclConfig {
                                     .range(1, 8)
                                     .step(1)
                                     .formatValue { Component.literal("$it blocks/tick") }
+                            }
+                            .build()
+                    )
+                    .option(
+                        Option.createBuilder<Int>()
+                            .name(Component.literal("Block Switch Delay"))
+                            .description(
+                                OptionDescription.of(
+                                    Component.literal("Delay in ticks before placing when switching hotbar items (0-10 ticks). Prevents FastSwitch anticheat flags and server-side placement desync.")
+                                )
+                            )
+                            .binding(2, { config.blockSwitchDelayTicks }, { config.blockSwitchDelayTicks = it })
+                            .controller { opt ->
+                                IntegerSliderControllerBuilder.create(opt)
+                                    .range(0, 10)
+                                    .step(1)
+                                    .formatValue { Component.literal("$it ticks") }
                             }
                             .build()
                     )
@@ -169,13 +212,29 @@ object PrinterYaclConfig {
                     .option(
                         Option.createBuilder<String>()
                             .name(Component.literal("Scaffold Block Item"))
-                            .description(OptionDescription.of(Component.literal("Item identifier used for temporary scaffolding.")))
+                            .description(OptionDescription.of(Component.literal("Primary item identifier used for temporary scaffolding.")))
                             .binding("minecraft:dirt", { config.scaffoldBlockItem }, { config.scaffoldBlockItem = it })
                             .controller { opt ->
                                 DropdownStringControllerBuilder.create(opt)
-                                    .values("minecraft:dirt", "minecraft:cobblestone", "minecraft:netherrack", "minecraft:scaffolding")
+                                    .values("minecraft:dirt", "minecraft:scaffolding", "minecraft:cobblestone", "minecraft:netherrack")
                                     .allowAnyValue(true)
                             }
+                            .build()
+                    )
+                    .option(
+                        Option.createBuilder<String>()
+                            .name(Component.literal("Scaffold Whitelist"))
+                            .description(OptionDescription.of(Component.literal("Comma-separated list of approved items for scaffolding (e.g. minecraft:dirt, minecraft:scaffolding).")))
+                            .binding("minecraft:dirt, minecraft:scaffolding", { config.scaffoldBlockWhitelist }, { config.scaffoldBlockWhitelist = it })
+                            .controller(StringControllerBuilder::create)
+                            .build()
+                    )
+                    .option(
+                        Option.createBuilder<Boolean>()
+                            .name(Component.literal("Strict Whitelist Only"))
+                            .description(OptionDescription.of(Component.literal("Refuse unapproved junk blocks (such as cobblestone) when whitelisted items are missing.")))
+                            .binding(true, { config.strictScaffoldWhitelist }, { config.strictScaffoldWhitelist = it })
+                            .controller(BooleanControllerBuilder::create)
                             .build()
                     )
                     .option(

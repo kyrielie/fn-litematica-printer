@@ -310,4 +310,61 @@ class PrinterCoreTest {
             "Standing South looking North towards block must NOT allow North-facing observers"
         )
     }
+
+    @Test
+    fun testUnderFeetCollisionFilterDeflation() {
+        // Player standing at (0.5, 64.0, 0.5) with width 0.6 (X, Z in 0.2..0.8) and height 1.8 (Y in 64.0..65.8)
+        val playerMinX = 0.2
+        val playerMaxX = 0.8
+        val playerMinY = 64.0
+        val playerMaxY = 65.8
+        val playerMinZ = 0.2
+        val playerMaxZ = 0.8
+
+        // Deflate player box by 1e-4
+        val eps = 1e-4
+        val deflatedMinX = playerMinX + eps
+        val deflatedMaxX = playerMaxX - eps
+        val deflatedMinY = playerMinY + eps
+        val deflatedMaxY = playerMaxY - eps
+        val deflatedMinZ = playerMinZ + eps
+        val deflatedMaxZ = playerMaxZ - eps
+
+        // Block directly under feet: (0, 63, 0) -> Box: [0.0..1.0, 63.0..64.0, 0.0..1.0]
+        val floorMinY = 63.0
+        val floorMaxY = 64.0
+        val floorIntersects = deflatedMinX < 1.0 && deflatedMaxX > 0.0 &&
+                              deflatedMinY < floorMaxY && deflatedMaxY > floorMinY &&
+                              deflatedMinZ < 1.0 && deflatedMaxZ > 0.0
+
+        assertFalse(floorIntersects, "Block directly beneath feet must NOT collide with deflated player box")
+
+        // Block inside legs: (0, 64, 0) -> Box: [0.0..1.0, 64.0..65.0, 0.0..1.0]
+        val legMinY = 64.0
+        val legMaxY = 65.0
+        val legIntersects = deflatedMinX < 1.0 && deflatedMaxX > 0.0 &&
+                            deflatedMinY < legMaxY && deflatedMaxY > legMinY &&
+                            deflatedMinZ < 1.0 && deflatedMaxZ > 0.0
+
+        assertTrue(legIntersects, "Block inside player legs MUST collide and be rejected")
+    }
+
+    @Test
+    fun testGravityBlocksIdentification() {
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:sand"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:red_sand"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:gravel"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:anvil"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:chipped_anvil"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:damaged_anvil"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:white_concrete_powder"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:cyan_concrete_powder"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:pointed_dripstone"))
+        assertTrue(BuildOrderPlanner.isGravityBlock("minecraft:dragon_egg"))
+
+        assertFalse(BuildOrderPlanner.isGravityBlock("minecraft:stone"))
+        assertFalse(BuildOrderPlanner.isGravityBlock("minecraft:dirt"))
+        assertFalse(BuildOrderPlanner.isGravityBlock("minecraft:oak_log"))
+        assertFalse(BuildOrderPlanner.isGravityBlock("minecraft:glass"))
+    }
 }

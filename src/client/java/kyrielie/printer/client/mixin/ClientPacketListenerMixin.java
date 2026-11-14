@@ -4,6 +4,7 @@ import kyrielie.printer.client.telemetry.ServerTelemetryTracker;
 import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
+import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
 import net.minecraft.network.protocol.game.ClientboundSystemChatPacket;
@@ -23,6 +24,11 @@ public abstract class ClientPacketListenerMixin {
     @Inject(method = "handleBlockUpdate", at = @At("TAIL"))
     private void printer$onBlockUpdate(ClientboundBlockUpdatePacket packet, CallbackInfo ci) {
         ServerTelemetryTracker.INSTANCE.onBlockUpdate(packet.getPos(), packet.getBlockState());
+    }
+
+    @Inject(method = "handleChunkBlocksUpdate", at = @At("TAIL"))
+    private void printer$onChunkBlocksUpdate(ClientboundSectionBlocksUpdatePacket packet, CallbackInfo ci) {
+        packet.runUpdates((pos, state) -> ServerTelemetryTracker.INSTANCE.onBlockUpdate(pos, state));
     }
 
     @Inject(method = "handleContainerSetSlot", at = @At("TAIL"))

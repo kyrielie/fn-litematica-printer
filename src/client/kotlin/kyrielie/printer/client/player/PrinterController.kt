@@ -3,8 +3,10 @@ package kyrielie.printer.client.player
 import kyrielie.printer.client.bridge.LitematicaBridge
 import kyrielie.printer.client.config.ConfigManager
 import kyrielie.printer.client.config.PlacementMode
+import kyrielie.printer.client.guides.EvaluationResult
 import kyrielie.printer.client.guides.PlacementAction
 import kyrielie.printer.client.guides.PlacementGuideEngine
+import kyrielie.printer.client.guides.PlacementRejection
 import kyrielie.printer.client.telemetry.ServerTelemetryTracker
 import kyrielie.printer.model.PlacementTarget
 import kyrielie.printer.planner.BuildOrderPlanner
@@ -15,7 +17,10 @@ import net.minecraft.client.multiplayer.MultiPlayerGameMode
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
+import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket
 import net.minecraft.world.InteractionHand
+import net.minecraft.world.InteractionResult
+import net.minecraft.world.entity.player.Input
 import net.minecraft.world.item.Items
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.block.Blocks
@@ -43,6 +48,14 @@ data class LastPlacementRecord(
     val timestamp: Long
 )
 
+data class CandidateDiagnostic(
+    val pos: BlockPos,
+    val schemState: net.minecraft.world.level.block.state.BlockState,
+    val worldState: net.minecraft.world.level.block.state.BlockState,
+    val dist: Double,
+    val rejection: PlacementRejection
+)
+
 object PrinterController {
 
     data class LookOverride(val yaw: Float, val pitch: Float)
@@ -61,7 +74,7 @@ object PrinterController {
     private var placementCounterThisSec = 0
     private var lastSecondTimestamp = System.currentTimeMillis()
     private var lastDebugLogTimestamp = 0L
-    private var lastOutOfItemsLogTimestamp = 0L
+    private var lastDiagnosticLogTimestamp = 0L
     private var lastLevel: Level? = null
 
     // Server rollback & telemetry tracking
@@ -70,9 +83,24 @@ object PrinterController {
     private var rollbackCooldownTicks = 0
     private var lastPlacementRecord: LastPlacementRecord? = null
 
+    // Block switch pause (Anti-Desync Hotbar Switch Pause - Phase 6)
+    private var lastPlacedItem: net.minecraft.world.item.Item? = null
+    private var switchCooldownTicksRemaining: Int = 0
+
+    // 5-Second Stall Detection & In-Game Alerts
+    private var lastSuccessfulPlacementTime: Long = System.currentTimeMillis()
+    private var lastStallLogTime: Long = 0L
+    private var lastStallChatTime: Long = 0L
+    private var lastStallOverlayTime: Long = 0L
+    private var last30sStallAlertTime: Long = 0L
+
+    // Scaffolding tracking for scheduled demolition (removeScaffolding = true - Phase 7)
+    private val placedScaffolds = java.util.concurrent.ConcurrentHashMap<BlockPos, BlockPos>()
+
     // State for Decoupled Packet Mode (Approach C)
     private var pendingAction: PlacementAction? = null
     private var pendingOverride: LookOverride? = null
+    private var lastPlayerPos: Vec3? = null
 
     fun toggle() {
         isRunning = !isRunning
@@ -84,6 +112,19 @@ object PrinterController {
             lastPlacementRecord = null
             pendingAction = null
             pendingOverride = null
+            lastPlacedItem = null
+            switchCooldownTicksRemaining = 0
+            placedScaffolds.clear()
+            lastStallLogTime = 0L
+            lastStallChatTime = 0L
+            lastStallOverlayTime = 0L
+            last30sStallAlertTime = 0L
+        } else {
+            lastSuccessfulPlacementTime = System.currentTimeMillis()
+            last30sStallAlertTime = 0L
+            lastStallLogTime = 0L
+            lastStallChatTime = 0L
+            lastStallOverlayTime = 0L
         }
     }
 
@@ -102,19 +143,28 @@ object PrinterController {
     }
 
     /**
+     * Inspects operational gates and returns exact human-readable reason if printing is paused.
+     */
+    fun getOperationalBlockReason(mc: Minecraft, player: LocalPlayer): String? {
+        if (!isRunning || !ConfigManager.config.enabled) return "Printer is disabled"
+        if (mc.gui.screen() != null) return "Screen open (${mc.gui.screen()?.javaClass?.simpleName})"
+        if (player.isSpectator) return "Player is in spectator mode"
+        if (player.isUsingItem) return "Player is currently using an item"
+        if (player.isPassenger) return "Player is riding a vehicle/mount"
+        if (!player.isAlive) return "Player is dead"
+        if (mc.isPaused) return "Game is paused"
+        if (rollbackCooldownTicks > 0) return "Rollback cooldown active ($rollbackCooldownTicks ticks)"
+        if (switchCooldownTicksRemaining > 0) return "Tool/slot switch break active ($switchCooldownTicksRemaining ticks)"
+        if (ProtocolMovementGuard.isPacketThrottled()) return "Packet velocity throttled (>45 packets/100ms)"
+        return null
+    }
+
+    /**
      * Unified operational safety guard (G-2 + Claude review).
      * Prevents placement while typing in chat, menus, screens, or in non-controllable states.
      */
     fun canOperate(mc: Minecraft, player: LocalPlayer): Boolean {
-        if (!isRunning || !ConfigManager.config.enabled) return false
-        if (mc.gui.screen() != null) return false
-        if (player.isSpectator) return false
-        if (player.isUsingItem) return false
-        if (player.isPassenger) return false
-        if (!player.isAlive) return false
-        if (mc.isPaused) return false
-        if (rollbackCooldownTicks > 0) return false
-        return true
+        return getOperationalBlockReason(mc, player) == null
     }
 
     /**
@@ -280,6 +330,14 @@ object PrinterController {
         // 2. Clean expired placement cooldowns
         PlacementCache.cleanup()
 
+        // 2b. Movement-triggered failure cache purge: if player moves perspective, retry failing blocks
+        val pPos = player.position()
+        val prevPos = lastPlayerPos
+        if (prevPos == null || pPos.distanceToSqr(prevPos) > 0.64) {
+            lastPlayerPos = pPos
+            PlacementCache.clearFailures()
+        }
+
         // 3. Update stats counter
         val now = System.currentTimeMillis()
         if (now - lastSecondTimestamp >= 1000L) {
@@ -288,9 +346,38 @@ object PrinterController {
             lastSecondTimestamp = now
         }
 
-        if (!canOperate(mc, player)) return
+        // 4. Tick-based countdown timers: MUST decrement every client tick unconditionally
+        if (rollbackCooldownTicks > 0) {
+            rollbackCooldownTicks--
+        }
+        if (switchCooldownTicksRemaining > 0) {
+            switchCooldownTicksRemaining--
+        }
 
-        // 4. Server rollback detection (held item count unexpectedly jumping upward)
+        val opBlockReason = getOperationalBlockReason(mc, player)
+        if (opBlockReason != null) {
+            val stallDurationMs = now - lastSuccessfulPlacementTime
+            if (isRunning && stallDurationMs >= 5000L) {
+                val stallSeconds = stallDurationMs / 1000
+                if (now - lastStallOverlayTime >= 1500L) {
+                    lastStallOverlayTime = now
+                    try {
+                        player.sendOverlayMessage(
+                            net.minecraft.network.chat.Component.literal(
+                                "§c[Printer Paused ${stallSeconds}s] §e$opBlockReason"
+                            )
+                        )
+                    } catch (_: Throwable) {}
+                }
+                if (now - lastStallLogTime >= 2500L) {
+                    lastStallLogTime = now
+                    logger.warn("[Printer Paused ${stallSeconds}s] Blocked by operational condition: $opBlockReason")
+                }
+            }
+            return
+        }
+
+        // 5. Server rollback detection (held item count unexpectedly jumping upward)
         val currentSlot = player.inventory.selectedSlot
         val currentCount = player.inventory.getItem(currentSlot).count
         val hasInFlight = ServerTelemetryTracker.hasInFlightPlacements()
@@ -310,19 +397,14 @@ object PrinterController {
                 "[Printer ROLLBACK] Server rejected placement! Slot $currentSlot count jumped $lastExpectedItemCount -> $currentCount. $recDetails"
             )
             if (rec != null) {
-                PlacementCache.markPlaced(rec.pos, 2000L)
+                PlacementCache.markPlaced(rec.pos, 350L)
             }
             rollbackCooldownTicks = 2
         }
         lastTrackedSlot = currentSlot
         lastExpectedItemCount = currentCount
 
-        if (rollbackCooldownTicks > 0) {
-            rollbackCooldownTicks--
-            return
-        }
-
-        // 5. Handle tick-based execution for non-decoupled modes
+        // 6. Handle tick-based execution for non-decoupled modes
         when (ConfigManager.config.placementMode) {
             PlacementMode.DECOUPLED_PACKET -> {
                 // Handled in LocalPlayerMixin sendPosition hooks
@@ -436,7 +518,16 @@ object PrinterController {
         world: Level,
         eyePos: Vec3
     ): PlacementAction? {
-        val schematicWorld = LitematicaBridge.getSchematicWorld() ?: return null
+        val now = System.currentTimeMillis()
+        val schematicWorld = LitematicaBridge.getSchematicWorld()
+        if (schematicWorld == null) {
+            if (now - lastDiagnosticLogTimestamp >= 3000L) {
+                lastDiagnosticLogTimestamp = now
+                logger.info("[Printer Paused] No active Litematica schematic loaded or bridge unlinked.")
+            }
+            return null
+        }
+
         val reach = ConfigManager.config.survivalReachLimit
         val reachCeil = ceil(reach).toInt()
         val reachSq = reach * reach
@@ -448,9 +539,43 @@ object PrinterController {
         val mutPos = BlockPos.MutableBlockPos()
 
         val rawCandidates = ArrayList<PlacementTarget>()
-        val now = System.currentTimeMillis()
-        val shouldLog = (now - lastDebugLogTimestamp >= 1000L) && ConfigManager.config.debugLogging
+        val isStalled5s = isRunning && (now - lastSuccessfulPlacementTime >= 5000L)
+        val shouldLog = ((now - lastDebugLogTimestamp >= 1000L) && ConfigManager.config.debugLogging) || (isStalled5s && now - lastDebugLogTimestamp >= 1500L)
         if (shouldLog) lastDebugLogTimestamp = now
+
+        // Phase 7: Surgical Scaffolding Cleanup Queue (removeScaffolding = true)
+        if (ConfigManager.config.removeScaffolding && placedScaffolds.isNotEmpty()) {
+            val iterator = placedScaffolds.entries.iterator()
+            while (iterator.hasNext()) {
+                val (scaffoldPos, targetPos) = iterator.next()
+                val scaffoldState = world.getBlockState(scaffoldPos)
+                if (scaffoldState.isAir) {
+                    iterator.remove()
+                    continue
+                }
+                val targetState = world.getBlockState(targetPos)
+                if (!targetState.isAir && !targetState.canBeReplaced()) {
+                    val sX = scaffoldPos.x + 0.5 - eyeX
+                    val sY = scaffoldPos.y + 0.5 - eyeY
+                    val sZ = scaffoldPos.z + 0.5 - eyeZ
+                    if (sX * sX + sY * sY + sZ * sZ <= reachSq && !PlacementCache.isCached(scaffoldPos)) {
+                        val toolSet = kyrielie.printer.client.mining.ToolSet(
+                            player,
+                            ConfigManager.config.itemSaver,
+                            ConfigManager.config.itemSaverThreshold
+                        )
+                        val bestSlot = toolSet.getBestSlot(scaffoldState)
+                        val scaffoldAim = Vec3(scaffoldPos.x + 0.5, scaffoldPos.y + 0.5, scaffoldPos.z + 0.5)
+                        return PlacementAction.ClearObstacle(scaffoldPos, scaffoldAim, bestSlot)
+                    }
+                }
+            }
+        }
+
+        var totalMismatchedInReach = 0
+        var layerMaskFilteredCount = 0
+        var playerCollisionCount = 0
+        var cooldownCachedCount = 0
 
         for (dx in -reachCeil..reachCeil) {
             for (dy in -reachCeil..reachCeil) {
@@ -465,21 +590,32 @@ object PrinterController {
                     val cZ = targetZ + 0.5 - eyeZ
                     if (cX * cX + cY * cY + cZ * cZ > reachSq) continue
 
-                    // 2. Zero-allocation Player AABB intersection check (G-11):
+                    mutPos.set(targetX, targetY, targetZ)
+                    val schemState = schematicWorld.getBlockState(mutPos)
+                    val worldState = world.getBlockState(mutPos)
+                    if (schemState.isAir || schemState == worldState) continue
+
+                    totalMismatchedInReach++
+
+                    // 2. Litematica render layer filtering
+                    if (!LitematicaBridge.isPositionWithinRenderLayers(mutPos)) {
+                        layerMaskFilteredCount++
+                        continue
+                    }
+
+                    // 3. Zero-allocation Player AABB intersection check (G-11):
                     // Allows blocks under feet while strictly rejecting head & body without allocating AABB objects
                     if (playerBox.minX < targetX + 1.0 && playerBox.maxX > targetX &&
                         playerBox.minY < targetY + 1.0 && playerBox.maxY > targetY &&
                         playerBox.minZ < targetZ + 1.0 && playerBox.maxZ > targetZ) {
+                        playerCollisionCount++
                         continue
                     }
 
-                    mutPos.set(targetX, targetY, targetZ)
-                    if (!LitematicaBridge.isPositionWithinRenderLayers(mutPos)) continue
-
-                    val schemState = schematicWorld.getBlockState(mutPos)
-                    val worldState = world.getBlockState(mutPos)
-                    if (schemState.isAir || schemState == worldState) continue
-                    if (PlacementCache.isCached(mutPos)) continue
+                    if (PlacementCache.isCached(mutPos)) {
+                        cooldownCachedCount++
+                        continue
+                    }
 
                     // F-07 Fix: Extract clean registered block key instead of Block.toString()
                     val blockId = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(schemState.block).toString()
@@ -493,7 +629,52 @@ object PrinterController {
             }
         }
 
-        if (rawCandidates.isEmpty()) return null
+        if (rawCandidates.isEmpty()) {
+            val emptyReason = when {
+                totalMismatchedInReach == 0 -> "All blocks in survival reach (${reach}m) match schematic."
+                layerMaskFilteredCount > 0 -> {
+                    val layerMode = LitematicaBridge.getLayerMode()
+                    "$layerMaskFilteredCount mismatching block(s) in reach are outside active Litematica layer range (LayerMode=$layerMode)."
+                }
+                playerCollisionCount > 0 -> "$playerCollisionCount candidate block(s) in reach are blocked: player body is standing inside target position."
+                cooldownCachedCount > 0 -> "$cooldownCachedCount candidate block(s) in reach are currently cooling down / leased from recent attempts."
+                else -> "No candidate blocks in range."
+            }
+
+            val stallDurationMs = now - lastSuccessfulPlacementTime
+            if (isRunning && stallDurationMs >= 5000L) {
+                val stallSeconds = stallDurationMs / 1000
+                if (now - lastStallOverlayTime >= 1500L) {
+                    lastStallOverlayTime = now
+                    try {
+                        val color = if (totalMismatchedInReach == 0) "§6[Printer Idle]" else "§c[Printer Stalled ${stallSeconds}s]"
+                        player.sendOverlayMessage(net.minecraft.network.chat.Component.literal("$color §e$emptyReason"))
+                    } catch (_: Throwable) {}
+                }
+                if (now - lastStallLogTime >= 2500L) {
+                    lastStallLogTime = now
+                    if (totalMismatchedInReach == 0) {
+                        logger.info("[Printer Idle ${stallSeconds}s] $emptyReason")
+                    } else {
+                        logger.warn("[Printer Stalled ${stallSeconds}s] $emptyReason (playerPos=${player.blockPosition()}, reach=${reach}m, mismatched=$totalMismatchedInReach, layerFiltered=$layerMaskFilteredCount, bodyCollision=$playerCollisionCount, cached=$cooldownCachedCount)")
+                    }
+                }
+                if (now - lastStallChatTime >= 8000L && totalMismatchedInReach > 0) {
+                    lastStallChatTime = now
+                    try {
+                        player.sendSystemMessage(net.minecraft.network.chat.Component.literal("§c[Printer Stalled ${stallSeconds}s] §e$emptyReason"))
+                    } catch (_: Throwable) {}
+                }
+            } else if (now - lastDiagnosticLogTimestamp >= 3000L) {
+                lastDiagnosticLogTimestamp = now
+                if (totalMismatchedInReach == 0) {
+                    logger.info("[Printer Idle] $emptyReason")
+                } else {
+                    logger.warn("[Printer Paused] $emptyReason")
+                }
+            }
+            return null
+        }
 
         // Phase 11: Strict Layer-by-Layer Synchronization
         val candidatesToProcess = if (ConfigManager.config.strictLayerSync) {
@@ -519,13 +700,16 @@ object PrinterController {
             crosshairBlock?.z
         )
 
+        val rejections = ArrayList<PlacementRejection>()
+        val candidateDiagnostics = ArrayList<CandidateDiagnostic>()
+
         for (candidate in sorted) {
             val targetPos = BlockPos(candidate.x, candidate.y, candidate.z)
             if (PlacementCache.isCached(targetPos)) continue
 
             val schemState = schematicWorld.getBlockState(targetPos)
             val isDecoupled = ConfigManager.config.placementMode == PlacementMode.DECOUPLED_PACKET
-            val action = PlacementGuideEngine.evaluate(
+            val evalResult = PlacementGuideEngine.evaluateDetailed(
                 mc,
                 player,
                 world,
@@ -537,18 +721,300 @@ object PrinterController {
                 maxReach = reach,
                 debug = shouldLog,
                 allowDecoupledBridge = isDecoupled
-            ) ?: continue
+            )
 
-            return action
+            when (evalResult) {
+                is EvaluationResult.Success -> return evalResult.action
+                is EvaluationResult.Rejected -> {
+                    rejections.add(evalResult.rejection)
+                    val dist = kotlin.math.sqrt(targetPos.distToCenterSqr(eyePos.x, eyePos.y, eyePos.z))
+                    candidateDiagnostics.add(
+                        CandidateDiagnostic(
+                            targetPos,
+                            schemState,
+                            world.getBlockState(targetPos),
+                            dist,
+                            evalResult.rejection
+                        )
+                    )
+                }
+            }
         }
 
-        if (rawCandidates.isNotEmpty() && now - lastOutOfItemsLogTimestamp >= 5000L) {
-            lastOutOfItemsLogTimestamp = now
-            val first = rawCandidates.first()
-            val state = schematicWorld.getBlockState(BlockPos(first.x, first.y, first.z))
-            logger.info("[Printer] Paused: Waiting for materials (${state.block.name.string}) in inventory.")
+        // Auto-heal watchdog: If candidates exist in reach but no placement succeeded for 1.5s,
+        // automatically purge stale placement leases and reset cooldowns (simulating toggle reset).
+        if (now - lastSuccessfulPlacementTime >= 1500L) {
+            if (cooldownCachedCount > 0 || rollbackCooldownTicks > 0 || switchCooldownTicksRemaining > 0) {
+                PlacementCache.clear()
+                rollbackCooldownTicks = 0
+                switchCooldownTicksRemaining = 0
+                lastTrackedSlot = -1
+                lastExpectedItemCount = -1
+                lastPlacedItem = null
+                if (shouldLog) {
+                    logger.info("[Printer Auto-Heal] Flushed placement cache and reset cooldowns to force retries.")
+                }
+            }
         }
 
+        val stallSummary = formatStallSummary(rejections, sorted.size)
+
+        if (now - lastDiagnosticLogTimestamp >= 3000L) {
+            lastDiagnosticLogTimestamp = now
+            if (stallSummary != null && !isStalled5s) {
+                logger.info("[Printer Stalled] $stallSummary")
+            }
+        }
+
+        handleStallDiagnostics(player, now, candidateDiagnostics, sorted.size)
+
+        return null
+    }
+
+    private fun handleStallDiagnostics(
+        player: LocalPlayer,
+        now: Long,
+        diagnostics: List<CandidateDiagnostic>,
+        totalCandidates: Int
+    ) {
+        if (!isRunning) return
+        val stallDurationMs = now - lastSuccessfulPlacementTime
+        if (stallDurationMs < 5000L) return
+
+        val stallSeconds = stallDurationMs / 1000
+
+        // Format concise 1-line reason for action bar overlay
+        val topDiag = diagnostics.firstOrNull()
+        val primaryReason = if (topDiag != null) {
+            formatConciseReason(topDiag)
+        } else {
+            "No reachable candidate blocks found"
+        }
+
+        // Action bar overlay every 1.5s while stalled
+        if (now - lastStallOverlayTime >= 1500L) {
+            lastStallOverlayTime = now
+            try {
+                player.sendOverlayMessage(
+                    net.minecraft.network.chat.Component.literal(
+                        "§c[Printer Stalled ${stallSeconds}s] §e$primaryReason"
+                    )
+                )
+            } catch (_: Throwable) {}
+        }
+
+        // Detailed console/file log every 2.5s while stalled
+        if (now - lastStallLogTime >= 2500L) {
+            lastStallLogTime = now
+            val logReport = buildDetailedStallReport(stallSeconds, diagnostics, totalCandidates, player)
+            logger.warn(logReport)
+        }
+
+        // In-game chat alert every 8s while stalled
+        if (now - lastStallChatTime >= 8000L) {
+            lastStallChatTime = now
+            val chatReport = buildChatStallReport(stallSeconds, diagnostics)
+            try {
+                player.sendSystemMessage(net.minecraft.network.chat.Component.literal(chatReport))
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun formatConciseReason(diag: CandidateDiagnostic): String {
+        val posStr = "(${diag.pos.x}, ${diag.pos.y}, ${diag.pos.z})"
+        val blockName = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(diag.schemState.block).path
+        return when (val rej = diag.rejection) {
+            is PlacementRejection.MissingItem -> {
+                val itemName = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(rej.item).path
+                "Missing $itemName for $posStr"
+            }
+            is PlacementRejection.InfeasibleOrientation -> {
+                "Orientation infeasible: $blockName at $posStr"
+            }
+            is PlacementRejection.RaycastFailed -> {
+                "Raycast occluded: $blockName at $posStr"
+            }
+            is PlacementRejection.NoSolidSupport -> {
+                "No solid support: $blockName at $posStr"
+            }
+            is PlacementRejection.BlockOccupied -> {
+                "Occupied by ${rej.existingBlock.descriptionId} at $posStr"
+            }
+            is PlacementRejection.SafetyGateBlocked -> {
+                "Safety gate blocked: ${rej.reason} at $posStr"
+            }
+            is PlacementRejection.MultiBlockSlave -> {
+                "Multi-block upper half at $posStr"
+            }
+            is PlacementRejection.AwaitingWaterlogging -> "Awaiting waterlogging at $posStr"
+            is PlacementRejection.AlreadyPlaced -> "Already placed at $posStr"
+        }
+    }
+
+    private fun buildDetailedStallReport(
+        stallSeconds: Long,
+        diagnostics: List<CandidateDiagnostic>,
+        totalCandidates: Int,
+        player: LocalPlayer
+    ): String {
+        val sb = StringBuilder()
+        sb.append("[Printer Stalled ${stallSeconds}s] No blocks placed for ${stallSeconds}s! ")
+        sb.append("Found $totalCandidates candidate(s) in reach. Showing top ${minOf(5, diagnostics.size)} blocking candidates:\n")
+        val pPos = player.blockPosition()
+        val heldItem = player.mainHandItem
+        val heldItemStr = if (heldItem.isEmpty) "Empty" else "${heldItem.item} x${heldItem.count}"
+        sb.append("  [Player State] pos=(${pPos.x}, ${pPos.y}, ${pPos.z}), look=(${"%.1f".format(player.yRot)}, ${"%.1f".format(player.xRot)}), held=$heldItemStr, slot=${player.inventory.selectedSlot}\n")
+
+        for ((index, diag) in diagnostics.take(5).withIndex()) {
+            val schemName = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(diag.schemState.block).toString()
+            val worldName = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(diag.worldState.block).toString()
+            sb.append("  Candidate #${index + 1} @ (${diag.pos.x}, ${diag.pos.y}, ${diag.pos.z}) dist=${"%.2f".format(diag.dist)}m: schem=$schemName, world=$worldName\n")
+            when (val rej = diag.rejection) {
+                is PlacementRejection.MissingItem -> {
+                    val itemName = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(rej.item).toString()
+                    val hasItem = InventoryRestockManager.hasItem(player, rej.item)
+                    sb.append("     -> MissingItem: $itemName (in inventory=$hasItem, ${rej.details ?: "required for placement/transformation"})\n")
+                }
+                is PlacementRejection.InfeasibleOrientation -> {
+                    sb.append("     -> InfeasibleOrientation: ${rej.details}\n")
+                }
+                is PlacementRejection.RaycastFailed -> {
+                    sb.append("     -> RaycastFailed: ${rej.details}\n")
+                    if (rej.faceAttempts.isNotEmpty()) {
+                        sb.append("        Faces tested:\n")
+                        for (attempt in rej.faceAttempts.take(6)) {
+                            sb.append("          * $attempt\n")
+                        }
+                    }
+                }
+                is PlacementRejection.NoSolidSupport -> {
+                    sb.append("     -> NoSolidSupport: ${rej.details}\n")
+                }
+                is PlacementRejection.BlockOccupied -> {
+                    val occName = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(rej.existingBlock).toString()
+                    sb.append("     -> BlockOccupied: $occName (not air/replaceable)\n")
+                }
+                is PlacementRejection.SafetyGateBlocked -> {
+                    sb.append("     -> SafetyGateBlocked: ${rej.reason}\n")
+                }
+                else -> {
+                    sb.append("     -> $rej\n")
+                }
+            }
+        }
+        return sb.toString().trimEnd()
+    }
+
+    private fun buildChatStallReport(
+        stallSeconds: Long,
+        diagnostics: List<CandidateDiagnostic>
+    ): String {
+        val sb = StringBuilder()
+        sb.append("§c[Printer Stalled ${stallSeconds}s] §eTop blocking candidates in reach:\n")
+        for ((index, diag) in diagnostics.take(3).withIndex()) {
+            val blockName = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(diag.schemState.block).path
+            val posStr = "(${diag.pos.x}, ${diag.pos.y}, ${diag.pos.z})"
+            val reasonStr = when (val rej = diag.rejection) {
+                is PlacementRejection.MissingItem -> {
+                    val item = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(rej.item).path
+                    "Missing item: §f$item"
+                }
+                is PlacementRejection.InfeasibleOrientation -> {
+                    "Orientation: §f${rej.details.take(60)}"
+                }
+                is PlacementRejection.RaycastFailed -> {
+                    "Occluded: §f${rej.details.take(60)}"
+                }
+                is PlacementRejection.NoSolidSupport -> {
+                    "No support: §f${rej.details.take(50)}"
+                }
+                is PlacementRejection.BlockOccupied -> {
+                    "Occupied by §f${rej.existingBlock.descriptionId}"
+                }
+                is PlacementRejection.SafetyGateBlocked -> {
+                    "Safety gate: §f${rej.reason}"
+                }
+                else -> rej.toString()
+            }
+            sb.append("§7#${index + 1} §e$posStr §6$blockName §7(§f${"%.1f".format(diag.dist)}m§7): §c$reasonStr\n")
+        }
+        return sb.toString().trimEnd()
+    }
+
+    private fun check30sStall(player: LocalPlayer, now: Long, reason: String) {
+        if (!isRunning) return
+        if (now - lastSuccessfulPlacementTime >= 30_000L) {
+            if (now - last30sStallAlertTime >= 10_000L) {
+                last30sStallAlertTime = now
+                logger.warn("[Printer Stall Alert] No placement for 30s! Reason: $reason")
+                try {
+                    player.sendSystemMessage(
+                        net.minecraft.network.chat.Component.literal("§c[Printer] Stalled (30s): §e$reason")
+                    )
+                } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    private fun formatStallSummary(rejections: List<PlacementRejection>, totalCandidates: Int): String? {
+        val missingItems = LinkedHashMap<String, Int>()
+        var noSupportCount = 0
+        var noSupportReason: String? = null
+        var orientationCount = 0
+        var orientationReason: String? = null
+        var raycastCount = 0
+        var raycastReason: String? = null
+        var safetyCount = 0
+        var occupiedCount = 0
+
+        for (rej in rejections) {
+            when (rej) {
+                is PlacementRejection.MissingItem -> {
+                    val name = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(rej.item).toString()
+                    missingItems[name] = (missingItems[name] ?: 0) + 1
+                }
+                is PlacementRejection.NoSolidSupport -> {
+                    noSupportCount++
+                    if (noSupportReason == null) noSupportReason = rej.details
+                }
+                is PlacementRejection.InfeasibleOrientation -> {
+                    orientationCount++
+                    if (orientationReason == null) orientationReason = rej.details
+                }
+                is PlacementRejection.RaycastFailed -> {
+                    raycastCount++
+                    if (raycastReason == null) raycastReason = rej.details
+                }
+                is PlacementRejection.SafetyGateBlocked -> safetyCount++
+                is PlacementRejection.BlockOccupied -> occupiedCount++
+                else -> {}
+            }
+        }
+
+        val details = ArrayList<String>()
+        if (missingItems.isNotEmpty()) {
+            val itemsFormatted = missingItems.entries.joinToString(", ") { "${it.key} (x${it.value})" }
+            details.add("Missing materials: $itemsFormatted")
+        }
+        if (noSupportCount > 0) {
+            details.add("No solid support (need scaffolding): $noSupportCount (${noSupportReason ?: "infeasible site"})")
+        }
+        if (orientationCount > 0) {
+            details.add("Orientation infeasible: $orientationCount (${orientationReason ?: "angle infeasible"})")
+        }
+        if (raycastCount > 0) {
+            details.add("Occluded or out of reach: $raycastCount")
+        }
+        if (safetyCount > 0) {
+            details.add("Safety gate blocked: $safetyCount")
+        }
+        if (occupiedCount > 0) {
+            details.add("Target position occupied: $occupiedCount")
+        }
+
+        if (details.isNotEmpty()) {
+            return "$totalCandidates candidate block(s) in reach cannot be placed:\n  * " + details.joinToString("\n  * ")
+        }
         return null
     }
 
@@ -567,16 +1033,26 @@ object PrinterController {
             is PlacementAction.PlaceBlock -> {
                 // Pre-flight Gate 1: Check target position is still replaceable
                 val currentTargetState = world.getBlockState(action.targetPos)
-                if (!currentTargetState.canBeReplaced()) {
+                val isWaterlogging = action.requiredItem == net.minecraft.world.item.Items.WATER_BUCKET
+                if (!isWaterlogging && !currentTargetState.canBeReplaced()) {
                     PlacementCache.markPlaced(action.targetPos, 500L)
                     return
                 }
 
-                // Pre-flight Gate 2: Re-verify schematic still requires this block
+                // Pre-flight Gate 2: Re-verify schematic still requires this block (including waterlogging & two-stage log stripping)
                 val schematicWorld = LitematicaBridge.getSchematicWorld()
                 val schemState = schematicWorld?.getBlockState(action.targetPos)
-                if (schemState != null && schemState.block.asItem() != action.requiredItem) {
-                    return
+                if (schemState != null) {
+                    val directItemMatch = schemState.block.asItem() == action.requiredItem
+                    val waterlogMatch = action.requiredItem == net.minecraft.world.item.Items.WATER_BUCKET &&
+                                        schemState.hasProperty(BlockStateProperties.WATERLOGGED) &&
+                                        schemState.getValue(BlockStateProperties.WATERLOGGED)
+                    val rawLogMatch = kyrielie.printer.client.interaction.BlockTransformationRegistry.getStrippedVariant(
+                        net.minecraft.world.level.block.Block.byItem(action.requiredItem)
+                    ) == schemState.block
+                    if (!directItemMatch && !waterlogMatch && !rawLogMatch) {
+                        return
+                    }
                 }
 
                 // Pre-flight Gate 3: Check support block is still solid
@@ -591,14 +1067,26 @@ object PrinterController {
                     return
                 }
 
-                // Pre-flight Gate 5: Player bounding box collision check
+                // Pre-flight Gate 5: Player bounding box collision check (deflated by 1e-4 to allow floor placement)
                 val targetAabb = net.minecraft.world.phys.AABB(action.targetPos)
-                if (player.boundingBox.intersects(targetAabb)) {
+                if (player.boundingBox.deflate(1e-4).intersects(targetAabb)) {
                     return
                 }
 
                 // G-3: Prepare item on hotbar strictly inside executeAction
+                val slotBefore = player.inventory.selectedSlot
                 val preparedHand = InventoryRestockManager.prepareItem(mc, player, action.requiredItem) ?: return
+                val slotAfter = player.inventory.selectedSlot
+
+                // Phase 6: Block Switch Placement Break (Anti-Desync Hotbar Switch Pause)
+                // Only enforce delay if the hotbar slot actually changed or a different item is held
+                if (lastPlacedItem != null && (action.requiredItem != lastPlacedItem || slotBefore != slotAfter) && ConfigManager.config.blockSwitchDelayTicks > 0) {
+                    switchCooldownTicksRemaining = ConfigManager.config.blockSwitchDelayTicks
+                    lastPlacedItem = action.requiredItem
+                    resetRollbackTracking()
+                    return
+                }
+                lastPlacedItem = action.requiredItem
 
                 // Pre-flight Gate 6: Strict held item identity check
                 val heldStack = player.getItemInHand(preparedHand)
@@ -617,7 +1105,17 @@ object PrinterController {
                 val pitchDiff = abs(override.pitch - player.xRot)
                 val angularDelta = sqrt(yawDiff * yawDiff + pitchDiff * pitchDiff)
 
-                val result = gameMode.useItemOn(player, preparedHand, action.hitResult)
+                val needsShift = FaceRaycaster.isInteractiveBlock(placeAgainstState)
+
+                val result = if (action.requiredItem is net.minecraft.world.item.PlaceOnWaterBlockItem) {
+                    gameMode.useItem(player, preparedHand)
+                } else if (needsShift) {
+                    withShift(player, true) {
+                        gameMode.useItemOn(player, preparedHand, action.hitResult)
+                    }
+                } else {
+                    gameMode.useItemOn(player, preparedHand, action.hitResult)
+                }
 
                 if (ConfigManager.config.debugLogging) {
                     logger.info(
@@ -644,18 +1142,66 @@ object PrinterController {
                     timestamp = System.currentTimeMillis()
                 )
 
+                val isStage1Log = schematicWorld?.getBlockState(action.targetPos)?.let { schem ->
+                    kyrielie.printer.client.interaction.BlockTransformationRegistry.getStrippedVariant(
+                        net.minecraft.world.level.block.Block.byItem(action.requiredItem)
+                    ) == schem.block
+                } ?: false
+
                 if (result.consumesAction()) {
-                    PlacementCache.markPlaced(action.targetPos, dynamicLease)
+                    lastSuccessfulPlacementTime = System.currentTimeMillis()
+                    PlacementCache.recordSuccess(action.targetPos)
+                    if (!isStage1Log) {
+                        PlacementCache.markPlaced(action.targetPos, dynamicLease)
+                    }
                     player.swing(preparedHand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
                     totalPlaced++
                     placementCounterThisSec++
+                    lastSuccessfulPlacementTime = System.currentTimeMillis()
 
                     val activeSlot = player.inventory.selectedSlot
                     val activeCount = player.inventory.getItem(activeSlot).count
                     lastTrackedSlot = activeSlot
                     lastExpectedItemCount = activeCount
+
+                    // Immediate in-tick stripping if axe is available
+                    if (isStage1Log) {
+                        val axePredicate = kyrielie.printer.client.interaction.BlockTransformationRegistry.AXES
+                        val hasAxe = InventoryRestockManager.hasItem(player) { !it.isEmpty && it.item in axePredicate }
+                        if (hasAxe) {
+                            val axeHand = InventoryRestockManager.prepareItem(mc, player) { !it.isEmpty && it.item in axePredicate }
+                            if (axeHand != null) {
+                                val faceToClick = Direction.entries
+                                    .filter { dir ->
+                                        val adjacent = world.getBlockState(action.targetPos.relative(dir))
+                                        adjacent.isAir || adjacent.canBeReplaced()
+                                    }
+                                    .maxByOrNull { dir ->
+                                        val faceVec = Vec3(dir.stepX.toDouble(), dir.stepY.toDouble(), dir.stepZ.toDouble())
+                                        val toEye = player.eyePosition.subtract(Vec3(action.targetPos.x + 0.5, action.targetPos.y + 0.5, action.targetPos.z + 0.5)).normalize()
+                                        faceVec.dot(toEye)
+                                    } ?: Direction.UP
+
+                                val stripAim = Vec3(
+                                    action.targetPos.x + 0.5 + faceToClick.stepX * 0.5,
+                                    action.targetPos.y + 0.5 + faceToClick.stepY * 0.5,
+                                    action.targetPos.z + 0.5 + faceToClick.stepZ * 0.5
+                                )
+                                val stripHit = BlockHitResult(stripAim, faceToClick, action.targetPos, false)
+                                ServerTelemetryTracker.setNextExpectedPlacement(action.targetPos, override.yaw, override.pitch)
+                                val stripResult = gameMode.useItemOn(player, axeHand, stripHit)
+                                if (ConfigManager.config.debugLogging) {
+                                    logger.info("[Printer Instant Strip] pos=${action.targetPos} face=$faceToClick with tool=${player.getItemInHand(axeHand).item} -> Result=$stripResult")
+                                }
+                                if (stripResult.consumesAction()) {
+                                    player.swing(axeHand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
+                                    PlacementCache.markPlaced(action.targetPos, 250L)
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    PlacementCache.markPlaced(action.targetPos, dynamicLease.coerceAtMost(600L))
+                    PlacementCache.recordFailure(action.targetPos)
                 }
             }
             is PlacementAction.MultiClick -> {
@@ -676,18 +1222,49 @@ object PrinterController {
                     }
                     totalPlaced++
                     placementCounterThisSec++
+                    lastSuccessfulPlacementTime = System.currentTimeMillis()
                 }
             }
             is PlacementAction.TransformBlock -> {
                 // Phase 8: Equip tool matching predicate (axe/hoe) and interact in-place
+                val slotBefore = player.inventory.selectedSlot
                 val preparedHand = InventoryRestockManager.prepareItem(mc, player, action.toolPredicate) ?: return
+                val slotAfter = player.inventory.selectedSlot
+
+                if (slotBefore != slotAfter && ConfigManager.config.blockSwitchDelayTicks > 0) {
+                    switchCooldownTicksRemaining = ConfigManager.config.blockSwitchDelayTicks
+                    resetRollbackTracking()
+                    return
+                }
+
+                val equippedItem = player.getItemInHand(preparedHand).item
+                lastPlacedItem = equippedItem
+
                 ServerTelemetryTracker.setNextExpectedPlacement(action.targetPos, override.yaw, override.pitch)
-                val result = gameMode.useItemOn(player, preparedHand, action.hitResult)
+                val placeAgainstState = world.getBlockState(action.hitResult.blockPos)
+                val needsShift = FaceRaycaster.isInteractiveBlock(placeAgainstState)
+
+                val result = if (needsShift) {
+                    withShift(player, true) {
+                        gameMode.useItemOn(player, preparedHand, action.hitResult)
+                    }
+                } else {
+                    gameMode.useItemOn(player, preparedHand, action.hitResult)
+                }
+
+                if (ConfigManager.config.debugLogging) {
+                    logger.info("[Printer Transform] pos=${action.targetPos} face=${action.hitResult.direction} with tool=$equippedItem -> Result=$result")
+                }
+
                 if (result.consumesAction()) {
                     player.swing(preparedHand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
                     PlacementCache.markPlaced(action.targetPos, 250L)
+                    PlacementCache.recordSuccess(action.targetPos)
                     totalPlaced++
                     placementCounterThisSec++
+                    lastSuccessfulPlacementTime = System.currentTimeMillis()
+                } else {
+                    PlacementCache.recordFailure(action.targetPos)
                 }
             }
             is PlacementAction.ClearObstacle -> {
@@ -715,30 +1292,82 @@ object PrinterController {
                 PlacementCache.markPlaced(action.targetPos, 200L)
             }
             is PlacementAction.ScaffoldSequence -> {
-                // Phase 7: Two-step scaffolding placement execution
-                val scaffoldName = ConfigManager.config.scaffoldBlockItem
-                val scaffoldId = net.minecraft.resources.Identifier.tryParse(scaffoldName)
-                    ?: net.minecraft.resources.Identifier.fromNamespaceAndPath("minecraft", "dirt")
-                val scaffoldOptional = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(scaffoldId)
-                val scaffoldItem = scaffoldOptional.map { it.value() }.orElse(Items.DIRT)
-                val preparedHand = InventoryRestockManager.prepareItem(mc, player, scaffoldItem) ?: return
+                // Phase 7: Two-step scaffolding placement execution with dynamic item resolution
+                val preparedHand = InventoryRestockManager.prepareItem(mc, player, action.scaffoldItem) ?: return
+
+                if (lastPlacedItem != null && action.scaffoldItem != lastPlacedItem && ConfigManager.config.blockSwitchDelayTicks > 0) {
+                    switchCooldownTicksRemaining = ConfigManager.config.blockSwitchDelayTicks
+                    lastPlacedItem = action.scaffoldItem
+                    resetRollbackTracking()
+                    return
+                }
+                lastPlacedItem = action.scaffoldItem
+
                 val scaffoldHit = BlockHitResult(
                     action.site.anchorFace.hitVec,
                     action.site.anchorFace.clickedFace,
                     action.site.anchorFace.placeAgainstPos,
                     false
                 )
-                val result = gameMode.useItemOn(player, preparedHand, scaffoldHit)
+                val placeAgainstState = world.getBlockState(action.site.anchorFace.placeAgainstPos)
+                val needsShift = FaceRaycaster.isInteractiveBlock(placeAgainstState)
+
+                ServerTelemetryTracker.setNextExpectedPlacement(action.site.scaffoldPos, override.yaw, override.pitch)
+
+                val result = if (needsShift) {
+                    withShift(player, true) {
+                        gameMode.useItemOn(player, preparedHand, scaffoldHit)
+                    }
+                } else {
+                    gameMode.useItemOn(player, preparedHand, scaffoldHit)
+                }
+
+                logger.info("[Printer Place Scaffold] pos=${action.site.scaffoldPos} (${action.site.anchorFace.clickedFace} on ${action.site.anchorFace.placeAgainstPos}) using ${action.scaffoldItem} -> Result=$result")
                 if (result.consumesAction()) {
                     player.swing(preparedHand, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true)
                     PlacementCache.markPlaced(action.site.scaffoldPos, 300L)
                     PlacementCache.markPlaced(action.targetPos, 150L)
+                    if (ConfigManager.config.removeScaffolding) {
+                        placedScaffolds[action.site.scaffoldPos] = action.targetPos
+                    }
                     totalPlaced++
                     placementCounterThisSec++
+                    lastSuccessfulPlacementTime = System.currentTimeMillis()
                 } else {
                     PlacementCache.markPlaced(action.targetPos, 500L)
                 }
             }
+        }
+    }
+
+    /**
+     * Executes placement with shift-click (sneaking) active so that right-clicking
+     * interactive blocks (noteblocks, chests, crafting tables, repeaters) places the
+     * held block instead of opening/tuning the container.
+     */
+    fun withShift(player: LocalPlayer, shift: Boolean, action: () -> InteractionResult): InteractionResult {
+        val previous = player.input.keyPresses
+        if (previous.shift() == shift) {
+            return action()
+        }
+        val temporary = Input(
+            previous.forward(),
+            previous.backward(),
+            previous.left(),
+            previous.right(),
+            previous.jump(),
+            shift,
+            previous.sprint()
+        )
+        return try {
+            player.input.keyPresses = temporary
+            player.setShiftKeyDown(shift)
+            player.connection.send(ServerboundPlayerInputPacket(temporary))
+            action()
+        } finally {
+            player.input.keyPresses = previous
+            player.setShiftKeyDown(previous.shift())
+            player.connection.send(ServerboundPlayerInputPacket(previous))
         }
     }
 

@@ -139,15 +139,25 @@ object ServerTelemetryTracker {
             inFlightByPos.remove(pos)
 
             // Auto-heal: mark placement cache with cooldown
-            PlacementCache.markPlaced(pos, 2000L)
+            PlacementCache.markPlaced(pos, 350L)
         } else {
             // Server confirmed placement
             val schemWorld = kyrielie.printer.client.bridge.LitematicaBridge.getSchematicWorld()
             val expectedState = schemWorld?.getBlockState(pos)
+            val isStrippableStage1 = expectedState != null && kyrielie.printer.client.interaction.BlockTransformationRegistry.getStrippedVariant(state.block) == expectedState.block
             if (expectedState != null && !expectedState.isAir && expectedState.block != state.block) {
-                logger.error(
-                    "[WRONG BLOCK MISPLACED] Misplaced block at $pos! Server confirmed ${state.block} but schematic expected ${expectedState.block}!"
-                )
+                if (isStrippableStage1) {
+                    kyrielie.printer.client.player.PlacementCache.remove(pos)
+                    if (kyrielie.printer.client.config.ConfigManager.config.debugLogging) {
+                        logger.info(
+                            "[Server STAGE 1] Placed unstripped ${state.block} at $pos awaiting stripping into ${expectedState.block} in ${latency}ms (seq=${info.sequence})!"
+                        )
+                    }
+                } else {
+                    logger.error(
+                        "[WRONG BLOCK MISPLACED] Misplaced block at $pos! Server confirmed ${state.block} but schematic expected ${expectedState.block}!"
+                    )
+                }
             } else if (kyrielie.printer.client.config.ConfigManager.config.debugLogging) {
                 logger.info(
                     "[Server CONFIRMED] Server confirmed $pos as ${state.block} in ${latency}ms (seq=${info.sequence})!"
@@ -158,17 +168,20 @@ object ServerTelemetryTracker {
     }
 
     fun onContainerSetSlot(containerId: Int, slot: Int, itemStack: ItemStack) {
-        if (!kyrielie.printer.client.config.ConfigManager.config.debugLogging) return
         val mc = Minecraft.getInstance()
         val player = mc.player ?: return
         if (containerId == 0) { // Player inventory container
             val selectedSlot = player.inventory.selectedSlot
             val hotbarContainerSlot = 36 + selectedSlot
             if (slot == hotbarContainerSlot) {
-                logger.info(
-                    "[Server SlotSync] Server sync on active hotbar slot $selectedSlot (containerSlot $slot): " +
-                    "count=${itemStack.count} (${itemStack.item})"
-                )
+                // Synchronize expected item count to prevent false-positive rollback detection
+                PrinterController.resetRollbackTracking()
+                if (kyrielie.printer.client.config.ConfigManager.config.debugLogging) {
+                    logger.info(
+                        "[Server SlotSync] Server sync on active hotbar slot $selectedSlot (containerSlot $slot): " +
+                        "count=${itemStack.count} (${itemStack.item})"
+                    )
+                }
             }
         }
     }

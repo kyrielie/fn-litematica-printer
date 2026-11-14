@@ -20,7 +20,9 @@ object LitematicaBridge {
 
     private var dataManagerClass: Class<*>? = null
     private var getRenderLayerRangeMethod: java.lang.reflect.Method? = null
-    private var isPositionWithinRangeMethod: java.lang.reflect.Method? = null
+    private var isPositionWithinRangeIntMethod: java.lang.reflect.Method? = null
+    private var isPositionWithinRangeBlockPosMethod: java.lang.reflect.Method? = null
+    private var lastLayerErrorLogTime: Long = 0L
 
     // Fallback packages candidate list
     private val SCHEMATIC_HANDLER_CANDIDATES = listOf(
@@ -35,6 +37,7 @@ object LitematicaBridge {
     )
 
     private val LAYER_RANGE_CANDIDATES = listOf(
+        "fi.dy.masa.malilib.util.position.LayerRange",
         "fi.dy.masa.malilib.util.LayerRange",
         "fi.dy.masa.litematica.util.LayerRange",
         "litematica.util.LayerRange"
@@ -74,10 +77,24 @@ object LitematicaBridge {
             for (className in LAYER_RANGE_CANDIDATES) {
                 try {
                     val cls = Class.forName(className)
-                    val method = cls.methods.firstOrNull { it.name == "isPositionWithinRange" && it.parameterCount == 1 }
-                    if (method != null) {
-                        isPositionWithinRangeMethod = method
-                        logger.info("[Printer] Found LayerRange at $className")
+                    // Prefer isPositionWithinRange(int, int, int) for zero boxing and zero overload ambiguity
+                    val intMethod = cls.methods.firstOrNull {
+                        it.name == "isPositionWithinRange" &&
+                        it.parameterTypes.size == 3 &&
+                        it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                        it.parameterTypes[1] == Int::class.javaPrimitiveType &&
+                        it.parameterTypes[2] == Int::class.javaPrimitiveType
+                    }
+                    val blockPosMethod = cls.methods.firstOrNull {
+                        it.name == "isPositionWithinRange" &&
+                        it.parameterTypes.size == 1 &&
+                        it.parameterTypes[0].name.endsWith("BlockPos")
+                    }
+
+                    if (intMethod != null || blockPosMethod != null) {
+                        isPositionWithinRangeIntMethod = intMethod
+                        isPositionWithinRangeBlockPosMethod = blockPosMethod
+                        logger.info("[Printer] Found LayerRange at $className (intMethod=${intMethod != null}, blockPosMethod=${blockPosMethod != null})")
                         break
                     }
                 } catch (_: ClassNotFoundException) {}
@@ -108,6 +125,7 @@ object LitematicaBridge {
     }
 
     private var cachedRenderLayerRange: Any? = null
+    private var isAllLayersActive: Boolean = true
     private var lastRangeQueryTime: Long = 0L
 
     fun isPositionWithinRenderLayers(pos: BlockPos): Boolean {
@@ -120,25 +138,88 @@ object LitematicaBridge {
                 val fetched = getRenderLayerRangeMethod?.invoke(null)
                 cachedRenderLayerRange = fetched
                 lastRangeQueryTime = now
+                if (fetched != null) {
+                    try {
+                        val modeMethod = fetched.javaClass.methods.firstOrNull { it.name == "getLayerMode" && it.parameterCount == 0 }
+                        val modeObj = modeMethod?.invoke(fetched)
+                        val modeName = when (modeObj) {
+                            is Enum<*> -> modeObj.name
+                            else -> modeObj?.toString()
+                        }
+                        isAllLayersActive = modeName == null || modeName.equals("ALL", ignoreCase = true)
+                    } catch (_: Exception) {
+                        isAllLayersActive = false
+                    }
+                } else {
+                    isAllLayersActive = true
+                }
                 fetched
             } ?: return true
 
-            var method = isPositionWithinRangeMethod
-            if (method == null) {
-                // Dynamically resolve on runtime instance class (G-6)
-                method = range.javaClass.methods.firstOrNull {
-                    it.name == "isPositionWithinRange" && it.parameterCount == 1
-                }
-                isPositionWithinRangeMethod = method
+            // G-11: Fast zero-reflection path when full layer rendering is active (ALL mode)
+            if (isAllLayersActive) return true
+
+            // Invoke (int, int, int) overload if available, otherwise fallback to (BlockPos)
+            val intMethod = isPositionWithinRangeIntMethod
+            if (intMethod != null) {
+                return intMethod.invoke(range, pos.x, pos.y, pos.z) as? Boolean ?: true
             }
-            method?.invoke(range, pos) as? Boolean ?: true
-        } catch (_: Exception) {
+
+            val bpMethod = isPositionWithinRangeBlockPosMethod
+            if (bpMethod != null) {
+                return bpMethod.invoke(range, pos) as? Boolean ?: true
+            }
+
+            // Dynamic runtime resolution if initial candidates were somehow missed
+            val runtimeIntMethod = range.javaClass.methods.firstOrNull {
+                it.name == "isPositionWithinRange" &&
+                it.parameterTypes.size == 3 &&
+                it.parameterTypes[0] == Int::class.javaPrimitiveType
+            }
+            if (runtimeIntMethod != null) {
+                isPositionWithinRangeIntMethod = runtimeIntMethod
+                return runtimeIntMethod.invoke(range, pos.x, pos.y, pos.z) as? Boolean ?: true
+            }
+
+            val runtimeBpMethod = range.javaClass.methods.firstOrNull {
+                it.name == "isPositionWithinRange" &&
+                it.parameterTypes.size == 1 &&
+                it.parameterTypes[0].name.endsWith("BlockPos")
+            }
+            if (runtimeBpMethod != null) {
+                isPositionWithinRangeBlockPosMethod = runtimeBpMethod
+                return runtimeBpMethod.invoke(range, pos) as? Boolean ?: true
+            }
+
             true
+        } catch (e: Exception) {
+            val now = System.currentTimeMillis()
+            if (now - lastLayerErrorLogTime > 5000L) {
+                lastLayerErrorLogTime = now
+                logger.warn("[Printer] Layer range evaluation failed: ${e.message}", e)
+            }
+            // If full layer mode is NOT active, do NOT allow placement through on error!
+            if (!isAllLayersActive) false else true
         }
     }
 
     fun getSchematicBlockState(pos: BlockPos): BlockState? {
         val world = getSchematicWorld() ?: return null
         return world.getBlockState(pos)
+    }
+
+    fun getLayerMode(): String? {
+        if (!isAvailable()) return null
+        return try {
+            val fetched = getRenderLayerRangeMethod?.invoke(null) ?: return null
+            val modeMethod = fetched.javaClass.methods.firstOrNull { it.name == "getLayerMode" && it.parameterCount == 0 }
+            val modeObj = modeMethod?.invoke(fetched)
+            when (modeObj) {
+                is Enum<*> -> modeObj.name
+                else -> modeObj?.toString()
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 }
