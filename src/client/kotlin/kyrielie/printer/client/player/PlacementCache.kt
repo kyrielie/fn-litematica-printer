@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap
 object PlacementCache {
 
     private val cache = ConcurrentHashMap<BlockPos, Long>()
+    private val failureCounts = ConcurrentHashMap<BlockPos, Int>()
     const val DEFAULT_TIMEOUT_MS = 400L
 
     /**
@@ -38,11 +39,32 @@ object PlacementCache {
     }
 
     fun markPlaced(pos: BlockPos, timeoutMs: Long = DEFAULT_TIMEOUT_MS) {
-        cache[pos] = System.currentTimeMillis() + timeoutMs
+        cache[pos.immutable()] = System.currentTimeMillis() + timeoutMs
+    }
+
+    fun recordFailure(pos: BlockPos) {
+        val count = (failureCounts[pos] ?: 0) + 1
+        failureCounts[pos] = count
+        if (count >= 3) {
+            // Backoff for 2.0s so the printer doesn't get trapped on one failing block
+            markPlaced(pos, 2000L)
+            failureCounts.remove(pos)
+        } else {
+            markPlaced(pos, 250L)
+        }
+    }
+
+    fun recordSuccess(pos: BlockPos) {
+        failureCounts.remove(pos.immutable())
     }
 
     fun remove(pos: BlockPos) {
-        cache.remove(pos)
+        cache.remove(pos.immutable())
+        failureCounts.remove(pos.immutable())
+    }
+
+    fun clearFailures() {
+        failureCounts.clear()
     }
 
     fun cleanup() {
@@ -52,5 +74,6 @@ object PlacementCache {
 
     fun clear() {
         cache.clear()
+        failureCounts.clear()
     }
 }

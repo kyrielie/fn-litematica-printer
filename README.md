@@ -139,7 +139,7 @@ cd fn-litematica-printer
 ./gradlew build --no-daemon
 ```
 
-The compiled mod JAR is placed in `build/libs/fn-litematica-printer-1.0.0+26.3.jar`.
+The compiled mod JAR is placed in `build/libs/fn-litematica-printer-2.0.0+26.3.jar`.
 
 ---
 

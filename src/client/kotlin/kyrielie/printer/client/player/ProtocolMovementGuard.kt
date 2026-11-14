@@ -26,6 +26,12 @@ object ProtocolMovementGuard {
     private val logger = LoggerFactory.getLogger("Printer/ProtocolMovementGuard")
     private const val ROTATION_EPSILON_DEGREES = 0.5f
 
+    // Sliding 100ms packet limiter (Disc-Jockey model)
+    private const val WINDOW_MS = 100L
+    private const val HARD_PACKET_LIMIT = 45
+    @Volatile private var windowStartMs: Long = 0L
+    @Volatile private var packetsInWindow: Int = 0
+
     @Volatile
     private var positionSentThisTick: Boolean = false
 
@@ -40,6 +46,13 @@ object ProtocolMovementGuard {
     }
 
     fun observeOutgoing(packet: Packet<*>) {
+        val now = System.currentTimeMillis()
+        if (now - windowStartMs >= WINDOW_MS) {
+            windowStartMs = now
+            packetsInWindow = 0
+        }
+        packetsInWindow++
+
         if (packet is ServerboundClientTickEndPacket) {
             positionSentThisTick = false
         } else if (packet is ServerboundMovePlayerPacket) {
@@ -56,6 +69,17 @@ object ProtocolMovementGuard {
     }
 
     fun isPositionSentThisTick(): Boolean = positionSentThisTick
+
+    /**
+     * True if outgoing packet velocity in the last 100ms exceeds safety limits (Disc-Jockey model).
+     */
+    fun isPacketThrottled(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - windowStartMs >= WINDOW_MS) {
+            return false
+        }
+        return packetsInWindow >= HARD_PACKET_LIMIT
+    }
 
     fun shouldSendRotation(yaw: Float, pitch: Float): Boolean {
         if (lastSentYaw.isNaN() || lastSentPitch.isNaN()) return true

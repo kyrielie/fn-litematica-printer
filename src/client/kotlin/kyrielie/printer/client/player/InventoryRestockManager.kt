@@ -72,9 +72,11 @@ object InventoryRestockManager {
         for (slot in 0..8) {
             val stack = inventory.getItem(slot)
             if (!stack.isEmpty && stack.count > 0 && itemPredicate(stack)) {
-                inventory.selectedSlot = slot
-                player.connection.send(ServerboundSetCarriedItemPacket(slot))
-                PrinterController.resetRollbackTracking()
+                if (inventory.selectedSlot != slot) {
+                    inventory.selectedSlot = slot
+                    player.connection.send(ServerboundSetCarriedItemPacket(slot))
+                    PrinterController.resetRollbackTracking()
+                }
                 return InteractionHand.MAIN_HAND
             }
         }
@@ -91,14 +93,14 @@ object InventoryRestockManager {
                 }
 
                 val now = System.currentTimeMillis()
-                if (now - lastRestockTimestamp < 200L) {
+                if (now - lastRestockTimestamp < 100L) {
                     return null
                 }
                 lastRestockTimestamp = now
 
-                val activeHotbarSlot = inventory.selectedSlot
+                // Select the best hotbar target slot to avoid kicking useful tools or pending blocks
+                val hotbarTargetSlot = selectBestHotbarSlot(inventory)
                 val containerSlot = slot
-                val hotbarTargetSlot = activeHotbarSlot
 
                 PrinterController.resetRollbackTracking()
                 gameMode.handleContainerInput(
@@ -108,12 +110,54 @@ object InventoryRestockManager {
                     ContainerInput.SWAP,
                     player
                 )
-                // Restock swap packet dispatched; pause 1 tick for server to process container change
+
+                // Select the target hotbar slot immediately so the player is holding the swapped item
+                if (inventory.selectedSlot != hotbarTargetSlot) {
+                    inventory.selectedSlot = hotbarTargetSlot
+                    player.connection.send(ServerboundSetCarriedItemPacket(hotbarTargetSlot))
+                    PrinterController.resetRollbackTracking()
+                }
+
+                // Pause 1 tick for container inventory synchronization
                 return null
             }
         }
 
         return null
+    }
+
+    /**
+     * Finds the best hotbar slot (0..8) to receive a restocked item:
+     * 1. The currently selected hotbar slot if it is empty.
+     * 2. Any other empty hotbar slot (count == 0 or isEmpty).
+     * 3. A non-tool slot (not damageable tool/weapon/shears).
+     * 4. Fallback to currently selected slot.
+     */
+    private fun selectBestHotbarSlot(inventory: Inventory): Int {
+        val active = inventory.selectedSlot
+        val activeStack = inventory.getItem(active)
+        if (activeStack.isEmpty || activeStack.count == 0) {
+            return active
+        }
+
+        // Search for empty hotbar slots
+        for (slot in 0..8) {
+            val s = inventory.getItem(slot)
+            if (s.isEmpty || s.count == 0) {
+                return slot
+            }
+        }
+
+        // Search for non-tool slots (damageable items or items with maxDamage > 1)
+        for (slot in 0..8) {
+            val s = inventory.getItem(slot)
+            val isTool = s.isDamageableItem || s.maxDamage > 1
+            if (!isTool) {
+                return slot
+            }
+        }
+
+        return active
     }
 
     /** Overload by Item instance: ensures non-empty and matching item */

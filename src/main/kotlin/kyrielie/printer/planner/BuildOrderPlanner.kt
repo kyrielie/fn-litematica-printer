@@ -89,7 +89,12 @@ object BuildOrderPlanner {
         crosshairZ: Int? = null
     ): List<PlacementTarget> {
         val comparator = Comparator<PlacementTarget> { a, b ->
-            // 0. Direct Crosshair Target Priority (if crosshair is aimed directly at candidate or adjacent place-against face)
+            // 1. Layer-by-layer (Ascending Y) strictly takes precedence to guarantee structural ground-up support
+            if (a.y != b.y) {
+                return@Comparator a.y.compareTo(b.y)
+            }
+
+            // 2. Direct Crosshair Target Priority within the same layer (if crosshair is aimed directly at candidate or adjacent place-against face)
             val hasCrosshair = crosshairX != null && crosshairY != null && crosshairZ != null
             val aIsCrosshair = hasCrosshair && (
                 (a.x == crosshairX && a.y == crosshairY && a.z == crosshairZ) ||
@@ -103,12 +108,7 @@ object BuildOrderPlanner {
                 return@Comparator if (aIsCrosshair) -1 else 1
             }
 
-            // 1. Layer-by-layer (Ascending Y)
-            if (a.y != b.y) {
-                return@Comparator a.y.compareTo(b.y)
-            }
-
-            // 2. Structural dependency within the same layer
+            // 3. Structural dependency within the same layer
             val aAttached = isAttachedBlock(a.blockId)
             val bAttached = isAttachedBlock(b.blockId)
             if (aAttached != bAttached) {

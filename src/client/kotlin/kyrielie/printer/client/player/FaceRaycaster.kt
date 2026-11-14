@@ -73,13 +73,23 @@ object FaceRaycaster {
         eyePos: Vec3,
         targetPos: BlockPos,
         maxReach: Double = 4.5,
-        allowDecoupledBridge: Boolean = true
+        allowDecoupledBridge: Boolean = true,
+        requiredAxis: Direction.Axis? = null
     ): FaceRaycastResult {
         val failureLog = ArrayList<String>()
         var foundAnySolidNeighbor = false
 
-        // F-05: Prioritize non-interactive solid blocks first to prevent accidental container opening
-        val sortedDirs = Direction.entries.sortedBy { dir ->
+        // Filter and sort candidate neighbor directions:
+        // 1. If requiredAxis is specified (e.g. non-Carpet pillar/log axis), only neighbor directions
+        //    whose clicked face (dir.opposite) matches that axis can be evaluated! Mismatched axes produce invalid orientation.
+        // 2. Prioritize non-interactive solid blocks first to avoid accidental tuning/interaction
+        val candidateDirs = if (requiredAxis != null) {
+            Direction.entries.filter { it.axis == requiredAxis }
+        } else {
+            Direction.entries
+        }
+
+        val sortedDirs = candidateDirs.sortedBy { dir ->
             val neighborState = world.getBlockState(targetPos.relative(dir))
             if (isInteractiveBlock(neighborState)) 1 else 0
         }
@@ -117,8 +127,10 @@ object FaceRaycaster {
                           (eyePos.y - hitVec.y) * clickedFace.stepY +
                           (eyePos.z - hitVec.z) * clickedFace.stepZ
                 val isForwardBridging = clickedFace.axis.isHorizontal && eyePos.y >= hitVec.y && v >= 0.85
-                val minDot = if (isForwardBridging) {
-                    if (allowDecoupledBridge) -1.05 else -0.75
+                val minDot = if (allowDecoupledBridge) {
+                    -1.05
+                } else if (isForwardBridging) {
+                    -0.75
                 } else {
                     -0.15
                 }
@@ -201,9 +213,10 @@ object FaceRaycaster {
         eyePos: Vec3,
         targetPos: BlockPos,
         maxReach: Double = 4.5,
-        allowDecoupledBridge: Boolean = true
+        allowDecoupledBridge: Boolean = true,
+        requiredAxis: Direction.Axis? = null
     ): VisiblePlacementFace? {
-        val result = findPlacementFaceWithDiagnostics(world, player, eyePos, targetPos, maxReach, allowDecoupledBridge)
+        val result = findPlacementFaceWithDiagnostics(world, player, eyePos, targetPos, maxReach, allowDecoupledBridge, requiredAxis)
         return (result as? FaceRaycastResult.Success)?.face
     }
 }
