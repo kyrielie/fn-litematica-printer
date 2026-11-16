@@ -528,7 +528,7 @@ object PlacementGuideEngine {
         return EvaluationResult.Rejected(PlacementRejection.RaycastFailed(failDetail, failureReasons))
     }
 
-    private fun calculateClicksNeeded(current: BlockState, target: BlockState): Int {
+    fun calculateClicksNeeded(current: BlockState, target: BlockState): Int {
         if (current.hasProperty(RepeaterBlock.DELAY) && target.hasProperty(RepeaterBlock.DELAY)) {
             val curDelay = current.getValue(RepeaterBlock.DELAY)
             val tarDelay = target.getValue(RepeaterBlock.DELAY)

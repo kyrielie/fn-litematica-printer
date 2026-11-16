@@ -7,9 +7,21 @@ import kyrielie.printer.util.deltaToYawPitch
 import kyrielie.printer.util.orderByAngularProximity
 import kyrielie.printer.util.wrapDegrees
 import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
+import net.minecraft.SharedConstants
+import net.minecraft.server.Bootstrap
 
 class PrinterCoreTest {
+
+    companion object {
+        @BeforeAll
+        @JvmStatic
+        fun setup() {
+            SharedConstants.tryDetectVersion()
+            Bootstrap.bootStrap()
+        }
+    }
 
     @Test
     fun testWrapDegrees() {
